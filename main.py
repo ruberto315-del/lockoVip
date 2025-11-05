@@ -146,10 +146,6 @@ async def init_db():
                 name TEXT,
                 username TEXT,
                 block INTEGER DEFAULT 0,
-                attacks_left INTEGER DEFAULT 20,
-                promo_attacks INTEGER DEFAULT 0,
-                referral_attacks INTEGER DEFAULT 0,
-                unused_referral_attacks INTEGER DEFAULT 0,
                 last_attack_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 referrer_id BIGINT,
                 referral_count INTEGER DEFAULT 0,
@@ -167,11 +163,6 @@ async def init_db():
         ''')
         
         # Додаємо нові колонки якщо їх немає
-        try:
-            await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS promo_attacks INTEGER DEFAULT 0')
-        except Exception as e:
-            logging.error(f"Error adding promo_attacks column: {e}")
-        
         try:
             await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER DEFAULT 0')
         except Exception as e:
@@ -731,15 +722,15 @@ async def add_user(user_id: int, name: str, username: str, referrer_id: int = No
     today = get_kyiv_date()
     async with db_pool.acquire() as conn:
         await conn.execute(
-            'INSERT INTO users (user_id, name, username, block, attacks_left, promo_attacks, referral_attacks, unused_referral_attacks, last_attack_date, referrer_id, is_vip) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (user_id) DO NOTHING',
-            user_id, name, username, 0, 20, 0, 0, 0, today, referrer_id, False
+            'INSERT INTO users (user_id, name, username, block, last_attack_date, referrer_id, is_vip) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (user_id) DO NOTHING',
+            user_id, name, username, 0, today, referrer_id, False
         )
         
         
         profile_link = f'<a href="tg://user?id={user_id}">{name}</a>'
         for admin_id in ADMIN:
             try:
-                await bot.send_message(admin_id, f"Новий користувач зареєструвався у боті:\nІм'я: {profile_link}\n🆔 ID: <code>{user_id}</code>", parse_mode='HTML')
+                await bot.send_message(admin_id, f"Новий користувач зареєструвався у боті:\nІм'я: {profile_link}\n\n🆔 ID:\n<code>{user_id}</code>", parse_mode='HTML')
             except Exception as e:
                 logging.error(f"Помилка при відправленні адміну {admin_id}: {e}")
 
@@ -783,9 +774,9 @@ async def start(message: Message):
     # Перевірка VIP статусу
     if not await check_vip_status(user_id):
         await message.answer(
-            "🔒 <b>У вас немає доступу до VIP</b>\n\n"
-            "Для використання бота потрібен VIP статус.\n"
-            "Зверніться до адміністратора для отримання доступу.",
+            "🔒 <b>VIP доступ недоступний</b>\n\n"
+            "На жаль, у вас немає VIP статусу для використання бота.\n"
+            "Для отримання доступу зверніться до адміністратора.",
             parse_mode="HTML"
         )
         return
@@ -849,9 +840,9 @@ async def process_subscription_confirmation(callback_query: types.CallbackQuery)
                 # Перевіряємо VIP статус
                 if not await check_vip_status(user_id):
                     await callback_query.message.edit_text(
-                        "🔒 <b>У вас немає доступу до VIP</b>\n\n"
-                        "Для використання бота потрібен VIP статус.\n"
-                        "Зверніться до адміністратора для отримання доступу.",
+                        "🔒 <b>VIP доступ недоступний</b>\n\n"
+                        "На жаль, у вас немає VIP статусу для використання бота.\n"
+                        "Для отримання доступу зверніться до адміністратора.",
                         parse_mode="HTML"
                     )
                     await callback_query.answer("Потрібен VIP статус", show_alert=True)
@@ -866,9 +857,9 @@ async def process_subscription_confirmation(callback_query: types.CallbackQuery)
                 # Перевіряємо VIP статус для існуючих користувачів
                 if not await check_vip_status(user_id):
                     await callback_query.message.edit_text(
-                        "🔒 <b>У вас немає доступу до VIP</b>\n\n"
-                        "Для використання бота потрібен VIP статус.\n"
-                        "Зверніться до адміністратора для отримання доступу.",
+                        "🔒 <b>VIP доступ недоступний</b>\n\n"
+                        "На жаль, у вас немає VIP статусу для використання бота.\n"
+                        "Для отримання доступу зверніться до адміністратора.",
                         parse_mode="HTML"
                     )
                     await callback_query.answer("Потрібен VIP статус", show_alert=True)
@@ -1696,9 +1687,9 @@ async def help(message: types.Message):
     
     if not await check_vip_status(user_id):
         await message.answer(
-            "🔒 <b>У вас немає доступу до VIP</b>\n\n"
-            "Для використання бота потрібен VIP статус.\n"
-            "Зверніться до адміністратора для отримання доступу.",
+            "🔒 <b>VIP доступ недоступний</b>\n\n"
+            "На жаль, у вас немає VIP статусу для використання бота.\n"
+            "Для отримання доступу зверніться до адміністратора.",
             parse_mode="HTML"
         )
         return
@@ -1735,9 +1726,9 @@ async def start_attack_prompt(message: Message):
     
     if not await check_vip_status(user_id):
         await message.answer(
-            "🔒 <b>У вас немає доступу до VIP</b>\n\n"
-            "Для використання бота потрібен VIP статус.\n"
-            "Зверніться до адміністратора для отримання доступу.",
+            "🔒 <b>VIP доступ недоступний</b>\n\n"
+            "На жаль, у вас немає VIP статусу для використання бота.\n"
+            "Для отримання доступу зверніться до адміністратора.",
             parse_mode="HTML"
         )
         return
@@ -2177,7 +2168,7 @@ async def handle_phone_number(message: Message, state: FSMContext = None):
         return  # Користувач в стані FSM, не обробляємо як номер телефону
     
     # Ігноруємо текст кнопок
-    button_texts = ['🆘 Допомога', '🎪 Запросити друга', '🎯 Почати атаку', '❓ Перевірити атаки', '🎁 У мене є промокод']
+    button_texts = ['🆘 Допомога', '🎯 Почати атаку']
     if message.text in button_texts:
         return
     
