@@ -550,12 +550,40 @@ def get_cancel_keyboard():
     return keyboard
 
 async def check_subscription_status(user_id):
+    # Адміни завжди проходять перевірку
+    if user_id in ADMIN:
+        return True
     try:
         member = await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
-        if member.status in {"member", "administrator", "creator"}:
+        # Отримуємо статус різними способами для сумісності
+        status_raw = member.status
+        status_str = str(status_raw).lower()
+        
+        # Логуємо статус для діагностики
+        logging.info(f"Користувач {user_id}: статус в каналі = '{status_str}' (тип: {type(status_raw).__name__})")
+        
+        # Список статусів, які означають що користувач НЕ підписаний
+        # "restricted" може означати підписку з обмеженнями, тому його не включаємо
+        not_subscribed_statuses = ["left", "kicked"]
+        
+        # Якщо статус НЕ в списку "не підписаних", значить користувач підписаний
+        if status_str not in not_subscribed_statuses:
+            logging.info(f"Користувач {user_id} успішно пройшов перевірку підписки (статус: {status_str})")
             return True
+        
+        # Логуємо якщо статус означає що користувач не підписаний
+        logging.warning(f"Користувач {user_id} не підписаний (статус: {status_str})")
+    except ChatNotFound as e:
+        logging.error(f"Канал не знайдено для користувача {user_id}: {e}")
     except Exception as e:
-        logging.error(f"Помилка: {e}")
+        logging.error(f"Помилка перевірки підписки для користувача {user_id}: {type(e).__name__}: {e}")
+        # Якщо помилка через те, що бот не має доступу, спробуємо альтернативний метод
+        try:
+            # Спробуємо отримати інформацію про канал
+            chat = await bot.get_chat(chat_id=channel_id)
+            logging.info(f"Бот має доступ до каналу {channel_id}")
+        except Exception as chat_error:
+            logging.error(f"Бот не може отримати доступ до каналу {channel_id}: {chat_error}")
     return False
 
 async def anti_flood(*args, **kwargs):
