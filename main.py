@@ -158,35 +158,11 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS blacklist (
                 phone_number TEXT PRIMARY KEY
             );
-            CREATE TABLE IF NOT EXISTS referrals (
-                id SERIAL PRIMARY KEY,
-                referrer_id BIGINT,
-                referred_id BIGINT,
-                join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(referred_id)
-            );
             CREATE TABLE IF NOT EXISTS user_messages (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT,
                 message_text TEXT,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS promocodes (
-                id SERIAL PRIMARY KEY,
-                code TEXT UNIQUE NOT NULL,
-                attacks_count INTEGER NOT NULL,
-                valid_until TIMESTAMP NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_active BOOLEAN DEFAULT TRUE
-            );
-            CREATE TABLE IF NOT EXISTS promo_activations (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                promo_code TEXT,
-                activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                attacks_added INTEGER,
-                UNIQUE(user_id, promo_code)
             );
         ''')
         
@@ -216,17 +192,18 @@ async def init_db():
         except Exception as e:
             logging.error(f"Error changing last_attack_date column type: {e}")
 
+        try:
+            await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_vip BOOLEAN DEFAULT FALSE')
+        except Exception as e:
+            logging.error(f"Error adding is_vip column: {e}")
+
 class Dialog(StatesGroup):
     spam = State()
     block_user = State()
     unblock_user = State()
-    create_promo = State()
-    create_promo_attacks = State()
-    create_promo_hours = State()
-    delete_promo = State()
-    enter_promo = State()
     add_to_blacklist = State()
     search_user = State()
+    give_vip = State()
 
 async def email():
     name_length = random.randint(6, 12)
@@ -550,6 +527,20 @@ def get_cancel_keyboard():
     keyboard.add(InlineKeyboardButton("🛑 Зупинити атаку", callback_data="cancel_attack"))
     return keyboard
 
+async def check_vip_status(user_id):
+    """Перевіряє чи користувач має VIP статус"""
+    if user_id in ADMIN:
+        return True  # Адміни завжди мають VIP
+    try:
+        async with db_pool.acquire() as conn:
+            result = await conn.fetchrow('SELECT is_vip FROM users WHERE user_id = $1', user_id)
+            if result:
+                return result['is_vip'] if result['is_vip'] is not None else False
+            return False
+    except Exception as e:
+        logging.error(f"Помилка перевірки VIP статусу для користувача {user_id}: {e}")
+        return False
+
 async def check_subscription_status(user_id):
     # Адміни завжди проходять перевірку
     if user_id in ADMIN:
@@ -611,10 +602,7 @@ async def anti_flood(*args, **kwargs):
 # Оновлюємо клавіатури
 profile_button = types.KeyboardButton('🎯 Почати атаку')
 referal_button = types.KeyboardButton('🆘 Допомога')
-referral_program_button = types.KeyboardButton('🎪 Запросити друга')
-check_attacks_button = types.KeyboardButton('❓ Перевірити атаки')
-promo_button = types.KeyboardButton('🎁 У мене є промокод')
-profile_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True).add(profile_button, referal_button).add(referral_program_button, check_attacks_button).add(promo_button)
+profile_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True).add(profile_button, referal_button)
 
 admin_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
 admin_keyboard.add("Надіслати повідомлення користувачам")
@@ -623,10 +611,7 @@ admin_keyboard.add("Статистика бота")
 admin_keyboard.add("Заблокувати користувача")
 admin_keyboard.add("Розблокувати користувача")
 admin_keyboard.add("Пошук користувача")
-admin_keyboard.add("Реферали")
-admin_keyboard.add("Створити промокод")
-admin_keyboard.add("Видалити промокод")
-admin_keyboard.add("Список промокодів")
+admin_keyboard.add("Видати віп")
 admin_keyboard.add("Перевірити проксі")
 admin_keyboard.add("Перевірити сервіси")
 admin_keyboard.add("Назад")
@@ -746,18 +731,15 @@ async def add_user(user_id: int, name: str, username: str, referrer_id: int = No
     today = get_kyiv_date()
     async with db_pool.acquire() as conn:
         await conn.execute(
-            'INSERT INTO users (user_id, name, username, block, attacks_left, promo_attacks, referral_attacks, unused_referral_attacks, last_attack_date, referrer_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (user_id) DO NOTHING',
-            user_id, name, username, 0, 20, 0, 0, 0, today, referrer_id
+            'INSERT INTO users (user_id, name, username, block, attacks_left, promo_attacks, referral_attacks, unused_referral_attacks, last_attack_date, referrer_id, is_vip) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (user_id) DO NOTHING',
+            user_id, name, username, 0, 20, 0, 0, 0, today, referrer_id, False
         )
         
-        if referrer_id:
-            # Використовуємо функцію process_referral для обробки рефералів
-            await process_referral(referrer_id, user_id, username, name)
         
         profile_link = f'<a href="tg://user?id={user_id}">{name}</a>'
         for admin_id in ADMIN:
             try:
-                await bot.send_message(admin_id, f"Новий користувач зареєструвався у боті:\nІм'я: {profile_link}", parse_mode='HTML')
+                await bot.send_message(admin_id, f"Новий користувач зареєструвався у боті:\nІм'я: {profile_link}\n🆔 ID: <code>{user_id}</code>", parse_mode='HTML')
             except Exception as e:
                 logging.error(f"Помилка при відправленні адміну {admin_id}: {e}")
 
@@ -796,6 +778,16 @@ async def start(message: Message):
             )
         logging.info(f"Збережена інформація про реферальне посилання: user_id={user_id}, referrer_id={referrer_id}")
         await message.answer("Для використання бота потрібно підписатися на наш канал!", reply_markup=checkSubMenu)
+        return
+    
+    # Перевірка VIP статусу
+    if not await check_vip_status(user_id):
+        await message.answer(
+            "🔒 <b>У вас немає доступу до VIP</b>\n\n"
+            "Для використання бота потрібен VIP статус.\n"
+            "Зверніться до адміністратора для отримання доступу.",
+            parse_mode="HTML"
+        )
         return
     
     async with db_pool.acquire() as conn:
@@ -854,28 +846,16 @@ async def process_subscription_confirmation(callback_query: types.CallbackQuery)
                 await add_user(callback_query.from_user.id, callback_query.from_user.full_name, callback_query.from_user.username, referrer_id)
                 
                 # Перевіряємо, чи досягнуто 20 рефералів для повідомлення адміну
-                if referrer_id:
-                    referrer_data = await conn.fetchrow(
-                        'SELECT referral_count, referral_notification_sent FROM users WHERE user_id = $1',
-                        referrer_id
+                # Перевіряємо VIP статус
+                if not await check_vip_status(user_id):
+                    await callback_query.message.edit_text(
+                        "🔒 <b>У вас немає доступу до VIP</b>\n\n"
+                        "Для використання бота потрібен VIP статус.\n"
+                        "Зверніться до адміністратора для отримання доступу.",
+                        parse_mode="HTML"
                     )
-                    
-                    if (referrer_data and 
-                        referrer_data['referral_count'] >= 20 and 
-                        not referrer_data['referral_notification_sent']):
-                        for admin_id in ADMIN:
-                            try:
-                                await bot.send_message(
-                                    admin_id,
-                                    f"🎉 Користувач <a href='tg://user?id={referrer_id}'>@{callback_query.from_user.username or 'User'}</a> досягнув 20 рефералів!",
-                                    parse_mode='HTML'
-                                )
-                                await conn.execute(
-                                    'UPDATE users SET referral_notification_sent = TRUE WHERE user_id = $1',
-                                    referrer_id
-                                )
-                            except Exception as e:
-                                logging.error(f"Помилка при повідомленні адміну {admin_id}: {e}")
+                    await callback_query.answer("Потрібен VIP статус", show_alert=True)
+                    return
                 
                 welcome_text = f"🎉 Ласкаво просимо, {callback_query.from_user.first_name}!\n\n"
                 welcome_text += "🎯 Ви успішно підписалися і тепер можете користуватися ботом.\n\n"
@@ -883,6 +863,17 @@ async def process_subscription_confirmation(callback_query: types.CallbackQuery)
                 await callback_query.message.edit_text(welcome_text, parse_mode='HTML')
                 await callback_query.message.answer("Оберіть дію:", reply_markup=profile_keyboard)
             else:
+                # Перевіряємо VIP статус для існуючих користувачів
+                if not await check_vip_status(user_id):
+                    await callback_query.message.edit_text(
+                        "🔒 <b>У вас немає доступу до VIP</b>\n\n"
+                        "Для використання бота потрібен VIP статус.\n"
+                        "Зверніться до адміністратора для отримання доступу.",
+                        parse_mode="HTML"
+                    )
+                    await callback_query.answer("Потрібен VIP статус", show_alert=True)
+                    return
+                
                 welcome_text = f"🎉 З поверненням, дуже на тебе чекали, {callback_query.from_user.first_name}!\n\n"
                 welcome_text = 'Використовуючи бота ви автоматично погоджуєтесь з <a href="https://telegra.ph/Umovi-vikoristannya-10-26-2">умовами використання</a>\n\n'
 
@@ -1240,259 +1231,6 @@ async def admin_check_services(message: Message):
     except Exception:
         await message.answer(result_text, parse_mode="HTML")
 
-# ПРОМОКОДЫ - АДМИН ПАНЕЛЬ
-
-@dp.message_handler(text="Створити промокод")
-async def create_promo_start(message: Message):
-    if message.from_user.id in ADMIN:
-        await Dialog.create_promo_attacks.set()
-        await message.answer("🎁 <b>Створення промокоду</b>\n\nВведіть кількість атак для промокоду:\n\n💡 Ви можете написати <b>Скасувати</b> для відміни.", parse_mode="html")
-    else:
-        await message.answer("Недостатньо прав.")
-
-@dp.message_handler(state=Dialog.create_promo_attacks)
-async def create_promo_attacks(message: Message, state: FSMContext):
-    text = message.text.strip()
-    
-    # Перевіряємо на скасування
-    if text.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
-        await state.finish()
-        await message.answer("❌ Операцію скасовано.", reply_markup=profile_keyboard)
-        return
-    
-    try:
-        attacks = int(text)
-        if attacks <= 0:
-            await message.answer("❌ Кількість атак має бути більше 0.\n\nВведіть число або напишіть <b>Скасувати</b> для відміни.", parse_mode="html")
-            return
-        
-        await state.update_data(attacks=attacks)
-        await Dialog.create_promo_hours.set()
-        await message.answer("⏰ Введіть строк дії промокоду в годинах (час, протягом якого користувачі зможуть ввести промокод) ЧАС МАЄ БУТИ +3 ГОДИНИ ВІД ПОТРІБНОГО:\n\n💡 Напишіть <b>Скасувати</b> для відміни.", parse_mode="html")
-    except ValueError:
-        await message.answer("❌ Введіть коректне число.\n\nСпробуйте ще раз або напишіть <b>Скасувати</b> для відміни.", parse_mode="html")
-
-@dp.message_handler(state=Dialog.create_promo_hours)
-async def create_promo_hours(message: Message, state: FSMContext):
-    text = message.text.strip()
-    
-    # Перевіряємо на скасування
-    if text.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
-        await state.finish()
-        await message.answer("❌ Операцію скасовано.", reply_markup=profile_keyboard)
-        return
-    
-    try:
-        hours = int(text)
-        if hours <= 0:
-            await message.answer("❌ Кількість годин має бути більше 0.\n\nВведіть число або напишіть <b>Скасувати</b> для відміни.", parse_mode="html")
-            return
-        
-        data = await state.get_data()
-        attacks = data['attacks']
-        
-        # Генеруємо унікальний промокод
-        async with db_pool.acquire() as conn:
-            while True:
-                promo_code = generate_promo_code()
-                existing = await conn.fetchval('SELECT 1 FROM promocodes WHERE code = $1', promo_code)
-                if not existing:
-                    break
-            
-            # Створюємо промокод
-            valid_until = datetime.now() + timedelta(hours=hours)
-            await conn.execute(
-                'INSERT INTO promocodes (code, attacks_count, valid_until) VALUES ($1, $2, $3)',
-                promo_code, attacks, valid_until
-            )
-        
-        await message.answer(
-            f"✅ Промокод створено!\n\n"
-            f"🎁 Код: <code>{promo_code}</code>\n"
-            f"⚔️ Атак: {attacks}\n"
-            f"⏰ Діє до: {valid_until.strftime('%d.%m.%Y %H:%M')}\n"
-            f"📝 Промокод можна ввести протягом {hours} годин\n"
-            f"🕐 Після активації діє 24 години",
-            parse_mode='HTML',
-            reply_markup=profile_keyboard
-        )
-        
-        await state.finish()
-    except ValueError:
-        await message.answer("❌ Введіть коректне число.\n\nСпробуйте ще раз або напишіть <b>Скасувати</b> для відміни.", parse_mode="html")
-
-@dp.message_handler(text="Видалити промокод")
-async def delete_promo_start(message: Message):
-    if message.from_user.id in ADMIN:
-        async with db_pool.acquire() as conn:
-            promos = await conn.fetch('SELECT code, attacks_count, valid_until FROM promocodes WHERE is_active = TRUE ORDER BY created_at DESC')
-        
-        if not promos:
-            await message.answer("Немає активних промокодів для видалення.")
-            return
-        
-        text = "🗑️ Активні промокоди:\n\n"
-        for promo in promos:
-            text += f"• <code>{promo['code']}</code> - {promo['attacks_count']} атак (до {promo['valid_until'].strftime('%d.%m.%Y %H:%M')})\n"
-        
-        text += "\nВведіть код промокоду для видалення:\n\n💡 Ви можете написати <b>Скасувати</b> для відміни."
-        
-        await Dialog.delete_promo.set()
-        await message.answer(text, parse_mode='HTML')
-    else:
-        await message.answer("Недостатньо прав.")
-
-@dp.message_handler(state=Dialog.delete_promo)
-async def delete_promo_process(message: Message, state: FSMContext):
-    promo_code = message.text.strip()
-    
-    # Перевіряємо на скасування
-    if promo_code.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
-        await state.finish()
-        await message.answer("❌ Операцію скасовано.", reply_markup=profile_keyboard)
-        return
-    
-    promo_code = promo_code.upper()
-    
-    async with db_pool.acquire() as conn:
-        # Перевіряємо існування промокоду
-        promo = await conn.fetchrow('SELECT * FROM promocodes WHERE code = $1 AND is_active = TRUE', promo_code)
-        
-        if not promo:
-            await message.answer("❌ Промокод не знайдено або вже видалено.\n\nВведіть код або напишіть <b>Скасувати</b> для відміни.", parse_mode="html")
-            return
-        
-        # Деактивуємо промокод
-        await conn.execute('UPDATE promocodes SET is_active = FALSE WHERE code = $1', promo_code)
-    
-    await message.answer(f"✅ Промокод <code>{promo_code}</code> успішно видалено!", parse_mode='HTML', reply_markup=profile_keyboard)
-    await state.finish()
-
-@dp.message_handler(text="Список промокодів")
-async def list_promos(message: Message):
-    if message.from_user.id in ADMIN:
-        async with db_pool.acquire() as conn:
-            promos = await conn.fetch('''
-                SELECT code, attacks_count, valid_until, created_at, is_active,
-                       (SELECT COUNT(*) FROM promo_activations WHERE promo_code = code) as used_count
-                FROM promocodes 
-                ORDER BY created_at DESC
-            ''')
-        
-        if not promos:
-            await message.answer("Промокодів поки що немає.")
-            return
-        
-        text = "📋 <b>Всі промокоди:</b>\n\n"
-        
-        for promo in promos:
-            status = "🟢 Активний" if promo['is_active'] else "🔴 Видалено"
-            if promo['is_active'] and datetime.now() > promo['valid_until']:
-                status = "⏰ Закінчився"
-            
-            text += f"• <code>{promo['code']}</code>\n"
-            text += f"  ⚔️ Атак: {promo['attacks_count']}\n"
-            text += f"  📅 Створено: {promo['created_at'].strftime('%d.%m.%Y %H:%M')}\n"
-            text += f"  ⏰ До: {promo['valid_until'].strftime('%d.%m.%Y %H:%M')}\n"
-            text += f"  👥 Використано: {promo['used_count']} разів\n"
-            text += f"  📊 Статус: {status}\n\n"
-        
-        await message.answer(text, parse_mode='HTML')
-    else:
-        await message.answer("Недостатньо прав.")
-
-# ПРОМОКОДЫ - ПОЛЬЗОВАТЕЛИ
-
-@dp.message_handler(text='🎁 У мене є промокод')
-@dp.throttled(anti_flood, rate=3)
-async def promo_handler(message: types.Message):
-    # Перевіряємо, що повідомлення з особистого чату
-    if message.chat.type != 'private':
-        return
-    
-    user_id = message.from_user.id
-    
-    if not await user_exists(user_id):
-        await message.answer("Для використання бота потрібно натиснути /start")
-        return
-    
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchrow("SELECT block FROM users WHERE user_id = $1", user_id)
-    
-    if result and result['block'] == 1:
-        await message.answer("Вас заблоковано і ви не можете користуватися ботом.")
-        return
-
-    if not await check_subscription_status(user_id):
-        await message.answer("Ви відписалися від каналу. Підпишіться, щоб продовжити використання бота.", reply_markup=checkSubMenu)
-        return
-    
-    await Dialog.enter_promo.set()
-    await message.answer("🎁 Введіть промокод:\n\n💡 Промокод складається тільки з букв та цифр. Номер телефону не є промокодом.")
-
-@dp.message_handler(state=Dialog.enter_promo)
-async def process_promo(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    text = message.text.strip()
-    
-    # Перевіряємо, чи це не номер телефону (якщо містить багато цифр і схоже на номер)
-    number_test = re.sub(r'\D', '', text)
-    if len(number_test) >= 9:  # Якщо 9+ цифр - це скоріше номер телефону
-        # Скидаємо стан і викликаємо обробник номерів
-        await state.finish()
-        # Викликаємо обробник номерів напряму
-        await handle_phone_number(message, state)
-        return
-    
-    promo_code = text.upper()
-    
-    async with db_pool.acquire() as conn:
-        # Перевіряємо існування та активність промокоду
-        promo = await conn.fetchrow('''
-            SELECT * FROM promocodes 
-            WHERE code = $1 AND is_active = TRUE AND valid_until > $2
-        ''', promo_code, datetime.now())
-        
-        if not promo:
-            await message.answer("❌ Промокод недійсний або закінчився строк його дії.")
-            await state.finish()
-            return
-        
-        # Перевіряємо, чи не використовував користувач вже цей промокод
-        already_used = await conn.fetchval('''
-            SELECT 1 FROM promo_activations 
-            WHERE user_id = $1 AND promo_code = $2
-        ''', user_id, promo_code)
-        
-        if already_used:
-            await message.answer("❌ Ви вже використали цей промокод.")
-            await state.finish()
-            return
-        
-        # Активуємо промокод
-        expires_at = datetime.now() + timedelta(hours=24)
-        
-        await conn.execute('''
-            INSERT INTO promo_activations (user_id, promo_code, expires_at, attacks_added)
-            VALUES ($1, $2, $3, $4)
-        ''', user_id, promo_code, expires_at, promo['attacks_count'])
-        
-        # Додаємо атаки користувачу
-        await conn.execute('''
-            UPDATE users SET promo_attacks = promo_attacks + $1 WHERE user_id = $2
-        ''', promo['attacks_count'], user_id)
-    
-    await message.answer(
-        f"🎉 Промокод успішно активовано!\n\n"
-        f"⚔️ Додано атак: {promo['attacks_count']}\n"
-        f"⏰ Діє до: {expires_at.strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"💡 Атаки від промокоду згорять при наступній щоденній роздачі атак.",
-        parse_mode='HTML'
-    )
-    
-    await state.finish()
-
-# Остальные обработчики...
 
 @dp.message_handler(text="Статистика бота")
 async def bot_stats(message: Message):
@@ -1519,20 +1257,6 @@ async def bot_stats(message: Message):
             # Отримуємо кількість заблокованих користувачів
             blocked_users = await conn.fetchval('SELECT COUNT(*) FROM users WHERE block = 1')
             
-            # Отримуємо кількість користувачів з рефералами
-            users_with_referrals = await conn.fetchval('SELECT COUNT(*) FROM users WHERE referral_count > 0')
-            
-            # Отримуємо загальну кількість рефералів
-            total_referrals = await conn.fetchval('SELECT COUNT(*) FROM referrals')
-            
-            # Отримуємо кількість користувачів, які досягли 20 рефералів
-            vip_users = await conn.fetchval('SELECT COUNT(*) FROM users WHERE referral_count >= 20')
-            
-            # Статистика промокодов
-            total_promos = await conn.fetchval('SELECT COUNT(*) FROM promocodes')
-            active_promos = await conn.fetchval('SELECT COUNT(*) FROM promocodes WHERE is_active = TRUE AND valid_until > $1', datetime.now())
-            promo_activations = await conn.fetchval('SELECT COUNT(*) FROM promo_activations')
-            
             # Активні користувачі за день (ті, хто мав активність сьогодні)
             today = get_kyiv_date()
             active_users_today = await conn.fetchval(
@@ -1545,14 +1269,7 @@ async def bot_stats(message: Message):
             f"👥 Всього користувачів: {total_users}\n"
             f"✅ Активних користувачів: {active_users}\n"
             f"📅 Активних користувачів за день: {active_users_today}\n"
-            f"🚫 Заблокованих користувачів: {blocked_users}\n"
-            f"📈 Користувачів з рефералами: {users_with_referrals}\n"
-            f"🔗 Всього рефералів: {total_referrals}\n"
-            f"⭐ VIP користувачів (20+ рефералів): {vip_users}\n\n"
-            f"🎁 <b>Промокоди:</b>\n"
-            f"📋 Всього створено: {total_promos}\n"
-            f"🟢 Активних: {active_promos}\n"
-            f"✨ Активацій: {promo_activations}"
+            f"🚫 Заблокованих користувачів: {blocked_users}"
         )
         
         await message.answer(message_text, parse_mode="HTML")
@@ -1740,35 +1457,6 @@ async def process_unblock(message: Message, state: FSMContext):
     
     await state.finish()
 
-@dp.message_handler(text="Реферали")
-async def show_referrals(message: Message):
-    if message.from_user.id in ADMIN:
-        async with db_pool.acquire() as conn:
-            referrals = await conn.fetch('''
-                SELECT user_id, name, username, referral_count 
-                FROM users 
-                WHERE referral_count > 0 
-                ORDER BY referral_count DESC
-            ''')
-        
-        if not referrals:
-            await message.answer("Поки що немає користувачів з рефералами.")
-            return
-        
-        message_text = "👥 <b>Користувачі з рефералами:</b>\n\n"
-        
-        for ref in referrals:
-            user_id = ref['user_id']
-            name = ref['name'] or "Без імені"
-            username = ref['username'] or "Без username"
-            count = ref['referral_count']
-            
-            message_text += f"• <a href='tg://user?id={user_id}'>{name}</a> (@{username})\n"
-            message_text += f"  └ Кількість рефералів: {count}\n\n"
-        
-        await message.answer(message_text, parse_mode="HTML")
-    else:
-        await message.answer("Недостатньо прав.")
 
 @dp.message_handler(text="Пошук користувача")
 async def search_user_start(message: Message):
@@ -1795,7 +1483,7 @@ async def search_user_process(message: Message, state: FSMContext):
         await state.finish()
         await message.answer("❌ Операцію скасовано.", reply_markup=admin_keyboard)
         return
-    
+        
     try:
         async with db_pool.acquire() as conn:
             # Спробуємо знайти за user_id (якщо введено число)
@@ -1871,45 +1559,109 @@ async def send_user_info(message: Message, user: dict, conn):
     name = user['name'] or "Без імені"
     username = user['username'] or "Без username"
     block_status = "🔴 Заблокований" if user['block'] == 1 else "🟢 Активний"
-    
-    # Отримуємо інформацію про рефералів
-    referral_info = await conn.fetchrow(
-        'SELECT COUNT(*) as count FROM referrals WHERE referrer_id = $1',
-        user_id
-    )
-    referral_count = referral_info['count'] if referral_info else 0
-    
-    # Отримуємо інформацію про реферера
-    referrer_name = None
-    if user['referrer_id']:
-        referrer = await conn.fetchrow(
-            'SELECT name, username FROM users WHERE user_id = $1',
-            user['referrer_id']
-        )
-        if referrer:
-            referrer_name = referrer['name'] or referrer['username'] or f"ID: {user['referrer_id']}"
+    vip_status = "⭐ VIP" if user.get('is_vip', False) else "❌ Без VIP"
     
     # Формуємо повідомлення
     info_text = f"👤 <b>Інформація про користувача</b>\n\n"
     info_text += f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
     info_text += f"📛 <b>Ім'я:</b> {name}\n"
     info_text += f"📱 <b>Username:</b> @{username}\n"
-    info_text += f"🔒 <b>Статус:</b> {block_status}\n\n"
-    
-    info_text += f"🎯 <b>Атаки:</b>\n"
-    info_text += f"   • Залишилось: {user['attacks_left']}\n"
-    info_text += f"   • Промо: {user['promo_attacks']}\n"
-    info_text += f"   • Реферальні: {user['referral_attacks']}\n"
-    info_text += f"   • Нереалізовані реферальні: {user['unused_referral_attacks']}\n\n"
+    info_text += f"🔒 <b>Статус:</b> {block_status}\n"
+    info_text += f"⭐ <b>VIP:</b> {vip_status}\n\n"
     
     if user['last_attack_date']:
-        info_text += f"📅 <b>Остання атака:</b> {user['last_attack_date']}\n\n"
-    
-    info_text += f"👥 <b>Реферали:</b> {referral_count}\n"
-    if referrer_name:
-        info_text += f"📥 <b>Реферер:</b> {referrer_name}\n"
+        info_text += f"📅 <b>Остання атака:</b> {user['last_attack_date']}\n"
     
     await message.answer(info_text, parse_mode="HTML", reply_markup=admin_keyboard)
+
+@dp.message_handler(text="Видати віп")
+async def give_vip_start(message: Message):
+    if message.from_user.id in ADMIN:
+        await message.answer(
+            "⭐ <b>Видача VIP статусу</b>\n\n"
+            "Введіть ID користувача, якому потрібно видати VIP статус:\n\n"
+            "💡 Ви можете написати <b>Скасувати</b> для відміни операції.",
+            parse_mode="HTML"
+        )
+        await Dialog.give_vip.set()
+    else:
+        await message.answer("Недостатньо прав.")
+
+@dp.message_handler(state=Dialog.give_vip)
+async def give_vip_process(message: Message, state: FSMContext):
+    user_input = message.text.strip()
+    
+    # Перевіряємо на скасування
+    if user_input.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
+        await state.finish()
+        await message.answer("❌ Операцію скасовано.", reply_markup=admin_keyboard)
+        return
+    
+    # Перевіряємо чи введено число (ID користувача)
+    if not user_input.isdigit():
+        await message.answer("❌ Помилка! Введіть коректний ID користувача (тільки цифри).")
+        return
+    
+    target_user_id = int(user_input)
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Перевіряємо чи користувач існує
+            user = await conn.fetchrow('SELECT user_id, name, username, is_vip FROM users WHERE user_id = $1', target_user_id)
+            
+            if not user:
+                await message.answer(
+                    f"❌ Користувач з ID <code>{target_user_id}</code> не знайдений в базі даних.",
+                    parse_mode="HTML"
+                )
+                await state.finish()
+                return
+
+            # Перевіряємо чи вже має VIP
+            if user['is_vip']:
+                name = user['name'] or "Без імені"
+                username = user['username'] or "Без username"
+                await message.answer(
+                    f"ℹ️ Користувач <a href='tg://user?id={target_user_id}'>{name}</a> (@{username}) вже має VIP статус.",
+                    parse_mode="HTML",
+                    reply_markup=admin_keyboard
+                )
+                await state.finish()
+                return
+            
+            # Видаємо VIP статус
+            await conn.execute('UPDATE users SET is_vip = TRUE WHERE user_id = $1', target_user_id)
+            
+            name = user['name'] or "Без імені"
+            username = user['username'] or "Без username"
+            
+            # Повідомляємо адміна
+            await message.answer(
+                f"✅ VIP статус успішно видано!\n\n"
+                f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
+                f"🆔 ID: <code>{target_user_id}</code>",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard
+            )
+            
+            # Повідомляємо користувача
+            try:
+                await bot.send_message(
+                    target_user_id,
+                    "🎉 <b>Вітаємо!</b>\n\n"
+                    "Вам надано VIP статус!\n"
+                    "Тепер ви можете повною мірою користуватися ботом.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logging.error(f"Не вдалося відправити повідомлення користувачу {target_user_id}: {e}")
+            
+            await state.finish()
+            
+    except Exception as e:
+        logging.error(f"Помилка при видачі VIP: {e}")
+        await message.answer(f"❌ Помилка при видачі VIP: {str(e)}", reply_markup=admin_keyboard)
+        await state.finish()
 
 @dp.message_handler(text="Назад")
 async def back_to_admin_menu(message: Message):
@@ -1937,9 +1689,18 @@ async def help(message: types.Message):
     if result and result['block'] == 1:
         await message.answer("Вас заблоковано і ви не можете користуватися ботом.")
         return
-
+    
     if not await check_subscription_status(user_id):
         await message.answer("Ви відписалися від каналу. Підпишіться, щоб продовжити використання бота.", reply_markup=checkSubMenu)
+        return
+    
+    if not await check_vip_status(user_id):
+        await message.answer(
+            "🔒 <b>У вас немає доступу до VIP</b>\n\n"
+            "Для використання бота потрібен VIP статус.\n"
+            "Зверніться до адміністратора для отримання доступу.",
+            parse_mode="HTML"
+        )
         return
     
     inline_keyboard = types.InlineKeyboardMarkup()
@@ -1947,102 +1708,6 @@ async def help(message: types.Message):
     inline_keyboard = inline_keyboard.add(code_sub)
     await bot.send_message(message.chat.id, "Виникли питання або знайшли проблему? Звертайся до @Nobysss", disable_web_page_preview=True, parse_mode="HTML", reply_markup=inline_keyboard)
 
-
-
-@dp.message_handler(text='🎪 Запросити друга')
-@dp.throttled(anti_flood, rate=3)
-async def referral_program(message: types.Message):
-    # Перевіряємо, що повідомлення з особистого чату
-    if message.chat.type != 'private':
-        return
-    
-    user_id = message.from_user.id
-    
-    if not await user_exists(user_id):
-        
-        await message.answer("Для використання бота потрібно натиснути /start")
-        return
-    
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchrow("SELECT block FROM users WHERE user_id = $1", user_id)
-    
-    if result and result['block'] == 1:
-        await message.answer("Вас заблоковано і ви не можете користуватися ботом.")
-        return
-    
-    if not await check_subscription_status(user_id):
-        await message.answer("Ви відписалися від каналу. Підпишіться, щоб продовжити використання бота.", reply_markup=checkSubMenu)
-        return
-    
-    async with db_pool.acquire() as conn:
-        referral_data = await conn.fetchrow(
-            'SELECT referral_count, referral_attacks, unused_referral_attacks FROM users WHERE user_id = $1',
-            user_id
-        )
-        
-        referral_count = referral_data['referral_count'] if referral_data else 0
-        referral_attacks = referral_data['referral_attacks'] if referral_data else 0
-        unused_referral_attacks = referral_data['unused_referral_attacks'] if referral_data else 0
-        
-        referral_total = referral_attacks + unused_referral_attacks
-        
-        bot_username = (await bot.me).username
-        referral_link = f"https://t.me/{bot_username}?start={user_id}"
-        
-        referrals = await conn.fetch(
-            'SELECT u.user_id, u.name, u.username, r.join_date FROM referrals r JOIN users u ON r.referred_id = u.user_id WHERE r.referrer_id = $1 ORDER BY r.join_date DESC',
-            user_id
-        )
-    
-    message_text = f"🎪 <b>Запросити друга</b>\n\n"
-    message_text += f"🔗 Ваше посилання:\n<code>{referral_link}</code>\n\n"
-    message_text += "💰 <b>Що ти отримуєш?</b>\n"
-    message_text += "✅ Ти отримуєш <b>+10 атак на один день</b>\n"
-    message_text += "✅ Твій друг також отримує <b>+10 атак на один день</b>\n\n"
-    message_text += "📋 <b>Як це працює?</b>\n"
-    message_text += "1️⃣ Скопіюй посилання вище\n"
-    message_text += "2️⃣ Відправ другу у Telegram\n"
-    message_text += "3️⃣ Коли друг натисне посилання і підпишеться на канал — ви обидва отримаєте по +10 атак на сьогодні!\n\n"
-    message_text += "⚡ <b>Важливо:</b>\n"
-    message_text += "• Атаки нараховуються тільки на поточний день\n"
-    message_text += "• Кожен новий друг = нові +10 атак для вас обох\n"
-    message_text += "• Обмежень на кількість запрошених друзів немає!\n\n"
-    
-    if referrals:
-        message_text += f"📊 <b>Статистика:</b>\n"
-        message_text += f"├ Всього рефералів: {referral_count}\n"
-        message_text += f"├ Доступно атак от рефералов: {referral_total}\n"
-        if unused_referral_attacks > 0:
-            message_text += f"└ Накопичено атак: {unused_referral_attacks}\n"
-        message_text += f"\n<b>Ваші реферали:</b>\n"
-        for ref in referrals:
-            ref_name = ref['username'] or ref['name'] or f"User{ref['user_id']}"
-            message_text += f"• <a href='tg://user?id={ref['user_id']}'>{ref_name}</a> - {ref['join_date'].strftime('%d.%m.%Y')}\n"
-    
-    keyboard = InlineKeyboardMarkup()
-    # Форматуємо текст без посилання - воно буде тільки в превью
-    share_text = f"Привіт! Приєднуйся до нашого боту! 📱 Завдяки тобі ми зможемо зростати та робити для тебе ще більше 🚀"
-    encoded_text = urllib.parse.quote(share_text)
-    # Використовуємо параметр url з referral_link для передачі параметра start - посилання буде в превью (клікабельне)
-    encoded_url = urllib.parse.quote(referral_link)
-    # Використовуємо обидва параметри - посилання буде тільки в превью, без дублювання
-    share_url = f"https://t.me/share/url?url={encoded_url}&text={encoded_text}"
-    keyboard.add(InlineKeyboardButton("🎯 Поділитися посиланням", url=share_url))
-    
-    await message.answer(message_text, parse_mode='HTML', reply_markup=keyboard)
-
-@dp.message_handler(text='❓ Перевірити атаки')
-@dp.throttled(anti_flood, rate=3)
-async def check_user_attacks(message: types.Message):
-    user_id = message.from_user.id
-    can_attack, attacks_left, promo_attacks, referral_attacks = await check_attack_limits(user_id)
-    total = attacks_left + promo_attacks + referral_attacks
-    text = f'⚔️ <b>Ваші атаки на сьогодні:</b>\n\n' \
-           f'🎯 Звичайних атак: <b>{attacks_left}</b>\n' \
-           f'🎁 Промо атак: <b>{promo_attacks}</b>\n' \
-           f'🎪 Реферальних атак: <b>{referral_attacks}</b>\n\n' \
-           f'🔄 Атаки відновляються о 00:00'
-    await message.answer(text, parse_mode='HTML')
 
 @dp.message_handler(text='🎯 Почати атаку')
 @dp.throttled(anti_flood, rate=3)
@@ -2068,12 +1733,13 @@ async def start_attack_prompt(message: Message):
         await message.answer("Ви відписалися від каналу. Підпишіться, щоб продовжити використання бота.", reply_markup=checkSubMenu)
         return
     
-    # Перевіряємо наявність атак
-    can_attack, attacks_left, promo_attacks, referral_attacks = await check_attack_limits(user_id)
-    total_attacks = attacks_left + promo_attacks + referral_attacks
-    
-    if total_attacks <= 0:
-        await message.answer("❌ У вас немає доступних атак. Вони відновляться завтра")
+    if not await check_vip_status(user_id):
+        await message.answer(
+            "🔒 <b>У вас немає доступу до VIP</b>\n\n"
+            "Для використання бота потрібен VIP статус.\n"
+            "Зверніться до адміністратора для отримання доступу.",
+            parse_mode="HTML"
+        )
         return
     
     message_text = '🎯 Готовий до атаки!\n\n💥 Очікую на номер телефону..'
@@ -2468,16 +2134,6 @@ async def start_attack(number, chat_id):
 
     logging.info(f"Атака на номер {number} завершена")
     
-    async with db_pool.acquire() as conn:
-        user_data = await conn.fetchrow(
-            'SELECT attacks_left, promo_attacks, referral_attacks FROM users WHERE user_id = $1',
-            chat_id
-        )
-    attacks_left = user_data['attacks_left'] if user_data else 0
-    promo_attacks = user_data['promo_attacks'] if user_data else 0
-    referral_attacks = user_data['referral_attacks'] if user_data and 'referral_attacks' in user_data else 0
-    total_attacks = attacks_left + promo_attacks + referral_attacks
-    
     inline_keyboard2 = types.InlineKeyboardMarkup()
     code_sub = types.InlineKeyboardButton(text='🎪 Канал', url='https://t.me/+tod0WSFEpEQ2ODcy')
     inline_keyboard2 = inline_keyboard2.add(code_sub)
@@ -2560,64 +2216,17 @@ async def handle_phone_number(message: Message, state: FSMContext = None):
         async with db_pool.acquire() as conn:
             # Використовуємо транзакцію для гарантії атомарності
             async with conn.transaction():
-                user_data = await conn.fetchrow(
-                    'SELECT attacks_left, promo_attacks, referral_attacks FROM users WHERE user_id = $1',
-                    user_id
-                )
-                
-                if not user_data:
-                    await message.answer("Помилка: Не вдалося знайти користувача.")
-                    return
-                
-                attacks_left = user_data['attacks_left'] if user_data['attacks_left'] is not None else 0
-                promo_attacks = user_data['promo_attacks'] if user_data['promo_attacks'] is not None else 0
-                referral_attacks = user_data['referral_attacks'] if user_data['referral_attacks'] is not None else 0
-                total_attacks = attacks_left + promo_attacks + referral_attacks
-                
-                logging.info(f"Перевірка атак для user_id={user_id}: attacks_left={attacks_left}, promo_attacks={promo_attacks}, referral_attacks={referral_attacks}, total={total_attacks}")
-                
-                if total_attacks <= 0:
-                    await message.answer("❌ У вас немає доступних атак. Перевірте ваші атаки командою ❓ Перевірити атаки")
-                    return
-                
                 # Перевіряємо чи немає вже активної атаки для цього користувача (в private чатах chat_id == user_id)
                 if active_attacks.get(chat_id, False):
                     await message.answer("⏳ У вас вже активна атака. Зачекайте поки вона завершиться або зупиніть її.")
                     return
                 
-                # Зменшуємо атаки: спочатку реферальні, потім промо, потім звичайні
+                # Оновлюємо last_attack_date
                 kyiv_now = get_kyiv_datetime()
-                if referral_attacks > 0:
-                    await conn.execute(
-                        'UPDATE users SET referral_attacks = GREATEST(0, COALESCE(referral_attacks, 0) - 1), last_attack_date = $1 WHERE user_id = $2',
-                        kyiv_now, user_id
-                    )
-                    # Перевіряємо що зміни застосувалися
-                    new_value = await conn.fetchval('SELECT referral_attacks FROM users WHERE user_id = $1', user_id)
-                    logging.info(f"Списано 1 реферальну атаку для user_id={user_id}, було: {referral_attacks}, стало: {new_value}")
-                elif promo_attacks > 0:
-                    await conn.execute(
-                        'UPDATE users SET promo_attacks = GREATEST(0, COALESCE(promo_attacks, 0) - 1), last_attack_date = $1 WHERE user_id = $2',
-                        kyiv_now, user_id
-                    )
-                    # Перевіряємо що зміни застосувалися
-                    new_value = await conn.fetchval('SELECT promo_attacks FROM users WHERE user_id = $1', user_id)
-                    logging.info(f"Списано 1 промо атаку для user_id={user_id}, було: {promo_attacks}, стало: {new_value}")
-                else:
-                    # Якщо реферальних і промо немає (або = 0), списуємо звичайні
-                    # Перевіряємо чи є звичайні атаки (вони мають бути, бо total_attacks > 0)
-                    if attacks_left > 0:
-                        await conn.execute(
-                            'UPDATE users SET attacks_left = GREATEST(0, COALESCE(attacks_left, 0) - 1), last_attack_date = $1 WHERE user_id = $2',
-                            kyiv_now, user_id
-                        )
-                        # Перевіряємо що зміни застосувалися
-                        new_value = await conn.fetchval('SELECT attacks_left FROM users WHERE user_id = $1', user_id)
-                        logging.info(f"Списано 1 звичайну атаку для user_id={user_id}, було: {attacks_left}, стало: {new_value}")
-                    else:
-                        logging.error(f"КРИТИЧНА ПОМИЛКА: total_attacks={total_attacks} > 0, але всі типи атак = 0! (attacks_left={attacks_left}, promo_attacks={promo_attacks}, referral_attacks={referral_attacks})")
-                        await message.answer("❌ Помилка при списанні атак. Зверніться до адміністратора.")
-                        return
+                await conn.execute(
+                    'UPDATE users SET last_attack_date = $1 WHERE user_id = $2',
+                    kyiv_now, user_id
+                )
         
         # Позначаємо що атака активна для цього користувача (в private чатах chat_id == user_id)
         active_attacks[chat_id] = True
@@ -2648,158 +2257,7 @@ async def cancel_attack(callback_query: types.CallbackQuery):
     except Exception:
         pass
 
-async def reset_daily_attacks():
-    """Відновлює атаки для всіх користувачів о 00:00 за київським часом"""
-    if not db_pool:
-        return
-    
-    today = get_kyiv_date()
-    kyiv_now = get_kyiv_datetime()
-    
-    try:
-        async with db_pool.acquire() as conn:
-            # Отримуємо всіх користувачів, у яких last_attack_date відрізняється від сьогодні
-            updated_count = await conn.execute(
-                """
-                UPDATE users 
-                SET attacks_left = 20, 
-                    referral_attacks = 0, 
-                    unused_referral_attacks = 0, 
-                    last_attack_date = $1
-                WHERE last_attack_date::date != $2 OR last_attack_date IS NULL
-                """,
-                kyiv_now, today
-            )
-            
-            # updated_count у asyncpg містить рядок типу "UPDATE 15", де 15 - кількість оновлених рядків
-            count = updated_count.split()[-1] if updated_count else "0"
-            logging.info(f"Автоматичне відновлення атак о 00:00: оновлено користувачів: {count}")
-    except Exception as e:
-        logging.error(f"Помилка при автоматичному відновленні атак: {e}")
 
-async def daily_attacks_reset_scheduler():
-    """Фоновий task, який перевіряє час і відновлює атаки о 00:00"""
-    last_reset_date = None
-    
-    def get_kyiv_now():
-        """Повертає поточний datetime з київським timezone"""
-        if ZoneInfo:
-            kyiv_tz = ZoneInfo("Europe/Kyiv")
-            return datetime.now(kyiv_tz)
-        elif pytz:
-            kyiv_tz = pytz.timezone("Europe/Kyiv")
-            return datetime.now(kyiv_tz)
-        else:
-            return datetime.now()
-    
-    while True:
-        try:
-            # Отримуємо київський час з timezone
-            now = get_kyiv_now()
-            current_date = now.date()
-            current_hour = now.hour
-            current_minute = now.minute
-            
-            # Перевіряємо чи настав новий день (00:00-00:01)
-            # і чи ще не виконувалось відновлення на цю дату
-            if current_hour == 0 and current_minute < 2:
-                if last_reset_date != current_date:
-                    logging.info(f"Запуск автоматичного відновлення атак о {now.strftime('%H:%M:%S')} за київським часом")
-                    await reset_daily_attacks()
-                    last_reset_date = current_date
-            else:
-                # Якщо не 00:00, скидаємо last_reset_date щоб наступного дня знову відновити
-                if last_reset_date and last_reset_date != current_date:
-                    last_reset_date = None
-            
-            # Перевіряємо кожну хвилину
-            await asyncio.sleep(60)
-        except Exception as e:
-            logging.error(f"Помилка в scheduler відновлення атак: {e}")
-            await asyncio.sleep(60)
-
-async def check_attack_limits(user_id: int):
-    today = get_kyiv_date()
-    
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchrow(
-            "SELECT attacks_left, promo_attacks, referral_attacks, unused_referral_attacks, last_attack_date FROM users WHERE user_id = $1",
-            user_id
-        )
-        
-        if not result:
-            return False, 0, 0, 0
-        
-        attacks_left = result['attacks_left'] or 0
-        promo_attacks = result['promo_attacks'] or 0
-        referral_attacks = result['referral_attacks'] or 0
-        unused_referral_attacks = result['unused_referral_attacks'] or 0
-        last_attack_date = result['last_attack_date']
-        
-        # Виправляємо негативні значення
-        if attacks_left < 0:
-            attacks_left = 0
-        if promo_attacks < 0:
-            promo_attacks = 0
-        if referral_attacks < 0:
-            referral_attacks = 0
-        if unused_referral_attacks < 0:
-            unused_referral_attacks = 0
-        
-        # Додаємо unused_referral_attacks до referral_attacks якщо referral_attacks <= 0
-        if referral_attacks <= 0 and unused_referral_attacks > 0:
-            referral_attacks = unused_referral_attacks
-            unused_referral_attacks = 0
-            # Оновлюємо в базі
-            await conn.execute(
-                "UPDATE users SET referral_attacks = $1, unused_referral_attacks = 0 WHERE user_id = $2",
-                referral_attacks, user_id
-            )
-        
-        # Перевіряємо чи referral_attacks не став негативним після операцій
-        if referral_attacks < 0:
-            referral_attacks = 0
-        
-        # Оновлюємо базу якщо були виправлення
-        if result['attacks_left'] != attacks_left or result['promo_attacks'] != promo_attacks or result['referral_attacks'] != referral_attacks or result['unused_referral_attacks'] != unused_referral_attacks:
-            await conn.execute(
-                "UPDATE users SET attacks_left = $1, promo_attacks = $2, referral_attacks = $3, unused_referral_attacks = $4 WHERE user_id = $5",
-                attacks_left, promo_attacks, referral_attacks, unused_referral_attacks, user_id
-            )
-        
-        # Приводим last_attack_date к дате для корректного сравнения
-        if last_attack_date:
-            last_attack_date_only = last_attack_date.date()
-        else:
-            last_attack_date_only = today
-        
-        # Перевіряємо, чи потрібно скинути атаки на новий день
-        if last_attack_date_only != today:
-            # Реферальні атаки скидаються (вони дійсні тільки на один день)
-            # Скидаємо звичайні атаки на 20 (максимум на день)
-            new_attacks = 20
-            kyiv_now = get_kyiv_datetime()
-            await conn.execute(
-                "UPDATE users SET attacks_left = $1, referral_attacks = 0, unused_referral_attacks = 0, last_attack_date = $2 WHERE user_id = $3",
-                new_attacks, kyiv_now, user_id
-            )
-            attacks_left = new_attacks
-            referral_attacks = 0
-            unused_referral_attacks = 0
-        elif attacks_left is None or attacks_left < 0:
-            # Якщо значення NULL або негативне - встановлюємо 20
-            # Це виправляє ситуації, коли в базі було некоректне значення
-            new_attacks = 20
-            await conn.execute(
-                "UPDATE users SET attacks_left = $1 WHERE user_id = $2",
-                new_attacks, user_id
-            )
-            attacks_left = new_attacks
-        
-        total_attacks = attacks_left + promo_attacks + referral_attacks
-        can_attack = total_attacks > 0
-        
-        return can_attack, attacks_left, promo_attacks, referral_attacks
 
 async def user_exists(user_id: int) -> bool:
     """
@@ -3153,108 +2611,11 @@ async def run_inline_giveaway_animation(inline_message_id: str, active_users: li
         logging.error(f"Помилка фінального inline-повідомлення: {e}")
 
 # Додаю функцію для нарахування реферальних атак
-async def process_referral(referrer_id, user_id, username, name):
-    if not referrer_id:
-        return
-    async with db_pool.acquire() as conn:
-        # Використовуємо транзакцію для атомарності всіх операцій
-        async with conn.transaction():
-            # Перевіряємо, чи вже існує такий реферал
-            existing_referral = await conn.fetchval(
-                'SELECT 1 FROM referrals WHERE referred_id = $1',
-                user_id
-            )
-            
-            # Якщо реферал вже існує, не робимо нічого
-            if existing_referral:
-                logging.info(f"Реферал вже існує для user_id={user_id}, referrer_id={referrer_id}")
-                return
-            
-            # Вставляємо новий реферал
-            await conn.execute(
-                'INSERT INTO referrals (referrer_id, referred_id) VALUES ($1, $2)',
-                referrer_id, user_id
-            )
-            
-            # Перевіряємо, чи існують користувачі перед оновленням
-            referrer_exists = await conn.fetchval('SELECT 1 FROM users WHERE user_id = $1', referrer_id)
-            user_exists = await conn.fetchval('SELECT 1 FROM users WHERE user_id = $1', user_id)
-            
-            if not referrer_exists:
-                logging.error(f"Запросивший користувач не існує: referrer_id={referrer_id}")
-                return
-            if not user_exists:
-                logging.error(f"Запрошений користувач не існує: user_id={user_id}")
-                return
-            
-            # Отримуємо поточну дату та час для оновлення last_attack_date
-            kyiv_now = get_kyiv_datetime()
-            
-            # Додаємо +10 атак запросившому (використовуємо COALESCE для обробки NULL)
-            # ВАЖЛИВО: оновлюємо last_attack_date, щоб атаки не скинулись при перевірці
-            # Додаємо атаки до referral_attacks (щоденні) та unused_referral_attacks (накопичені)
-            result_referrer = await conn.execute(
-                '''UPDATE users 
-                   SET referral_attacks = COALESCE(referral_attacks, 0) + 10, 
-                       unused_referral_attacks = COALESCE(unused_referral_attacks, 0) + 10,
-                       referral_count = COALESCE(referral_count, 0) + 1,
-                       last_attack_date = $2
-                   WHERE user_id = $1''',
-                referrer_id, kyiv_now
-            )
-            logging.info(f"Оновлення атак для запросившого (referrer_id={referrer_id}): {result_referrer}")
-            
-            # Додаємо +10 атак запрошеному (використовуємо COALESCE для обробки NULL)
-            # ВАЖЛИВО: оновлюємо last_attack_date, щоб атаки не скинулись при перевірці
-            result_referred = await conn.execute(
-                '''UPDATE users 
-                   SET referral_attacks = COALESCE(referral_attacks, 0) + 10,
-                       unused_referral_attacks = COALESCE(unused_referral_attacks, 0) + 10,
-                       last_attack_date = $2
-                   WHERE user_id = $1''',
-                user_id, kyiv_now
-            )
-            logging.info(f"Оновлення атак для запрошеного (user_id={user_id}): {result_referred}")
-            
-            # Перевіряємо результат після оновлення
-            referrer_check = await conn.fetchrow(
-                'SELECT referral_attacks, referral_count FROM users WHERE user_id = $1',
-                referrer_id
-            )
-            referred_check = await conn.fetchrow(
-                'SELECT referral_attacks FROM users WHERE user_id = $1',
-                user_id
-            )
-            logging.info(f"Перевірка після оновлення - запросивший: referral_attacks={referrer_check['referral_attacks'] if referrer_check else None}, referral_count={referrer_check['referral_count'] if referrer_check else None}")
-            logging.info(f"Перевірка після оновлення - запрошений: referral_attacks={referred_check['referral_attacks'] if referred_check else None}")
-        
-        # Відправляємо повідомлення після успішного завершення транзакції
-        try:
-            ref_name = username or name or f"User{user_id}"
-            # Повідомлення запросившому
-            await bot.send_message(
-                referrer_id,
-                f"🎉 За вашим посиланням приєднався новий користувач: <a href='tg://user?id={user_id}'>{ref_name}</a>\n🚀 Ви отримали +10 додаткових атак на сьогодні!",
-                parse_mode='HTML'
-            )
-            # Повідомлення запрошеному
-            async with db_pool.acquire() as conn_msg:
-                referrer_name_result = await conn_msg.fetchrow('SELECT name, username FROM users WHERE user_id = $1', referrer_id)
-                if referrer_name_result:
-                    referrer_name = referrer_name_result['username'] or referrer_name_result['name'] or f"User{referrer_id}"
-                    await bot.send_message(
-                        user_id,
-                        f"🎉 Вітаю! Ви зареєструвались за посиланням від <a href='tg://user?id={referrer_id}'>{referrer_name}</a>\n🚀 Ви отримали +10 додаткових атак на сьогодні за реєстрацію!",
-                        parse_mode='HTML'
-                    )
-        except Exception as e:
-            logging.error(f"Error notifying users about referral: {e}")
 
 async def on_startup(dp):
     """Функція, яка викликається при старті бота"""
     logging.info("Запуск фонових задач...")
     # Запускаємо scheduler для автоматичного відновлення атак
-    asyncio.create_task(daily_attacks_reset_scheduler())
     logging.info("Фонові задачі запущено")
 
 if __name__ == '__main__':
