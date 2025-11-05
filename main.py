@@ -140,24 +140,43 @@ async def init_db():
         logging.error(f"Помилка отримання інформації про бота: {e}")
     
     async with db_pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                name TEXT,
-                username TEXT,
-                block INTEGER DEFAULT 0,
-                last_attack_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS blacklist (
-                phone_number TEXT PRIMARY KEY
-            );
-            CREATE TABLE IF NOT EXISTS user_messages (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                message_text TEXT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        ''')
+        # Створюємо таблиці окремо для кращої обробки помилок
+        try:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    name TEXT,
+                    username TEXT,
+                    block INTEGER DEFAULT 0,
+                    last_attack_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+            logging.info("Таблиця users створена або вже існує")
+        except Exception as e:
+            logging.error(f"Помилка створення таблиці users: {e}")
+        
+        try:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS blacklist (
+                    phone_number TEXT PRIMARY KEY
+                );
+            ''')
+            logging.info("Таблиця blacklist створена або вже існує")
+        except Exception as e:
+            logging.error(f"Помилка створення таблиці blacklist: {e}")
+        
+        try:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_messages (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    message_text TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            ''')
+            logging.info("Таблиця user_messages створена або вже існує")
+        except Exception as e:
+            logging.error(f"Помилка створення таблиці user_messages: {e}")
         
         # Видаляємо таблиці, які більше не використовуються
         try:
@@ -226,6 +245,17 @@ async def init_db():
             await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expires_at TIMESTAMP')
         except Exception as e:
             logging.error(f"Error adding vip_expires_at column: {e}")
+        
+        # Перевіряємо що таблиці створені
+        try:
+            tables = await conn.fetch('''
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            ''')
+            logging.info(f"Таблиці в базі даних: {[table['table_name'] for table in tables]}")
+        except Exception as e:
+            logging.error(f"Помилка перевірки таблиць: {e}")
 
 class Dialog(StatesGroup):
     spam = State()
