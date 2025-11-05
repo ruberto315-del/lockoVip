@@ -129,9 +129,22 @@ def get_db_config():
         'port': int(os.getenv('PGPORT', '5432')),
     }
     
+    # Діагностика: перевіряємо які змінні доступні
+    logging.info(f"Діагностика змінних оточення:")
+    logging.info(f"  PGUSER: {'***' if os.getenv('PGUSER') else 'не встановлено'}")
+    logging.info(f"  POSTGRES_USER: {'***' if os.getenv('POSTGRES_USER') else 'не встановлено'}")
+    logging.info(f"  PGPASSWORD: {'***' if os.getenv('PGPASSWORD') else 'не встановлено'}")
+    logging.info(f"  POSTGRES_PASSWORD: {'***' if os.getenv('POSTGRES_PASSWORD') else 'не встановлено'}")
+    logging.info(f"  PGDATABASE: {os.getenv('PGDATABASE', 'не встановлено')}")
+    logging.info(f"  POSTGRES_DB: {os.getenv('POSTGRES_DB', 'не встановлено')}")
+    logging.info(f"  PGHOST: {os.getenv('PGHOST', 'не встановлено')}")
+    logging.info(f"  RAILWAY_PRIVATE_DOMAIN: {os.getenv('RAILWAY_PRIVATE_DOMAIN', 'не встановлено')}")
+    
     # Перевіряємо чи всі обов'язкові значення встановлені
     if not config['password']:
-        logging.warning("Пароль БД не встановлено! Перевірте змінні оточення PGPASSWORD або POSTGRES_PASSWORD")
+        logging.error("ПОМИЛКА: Пароль БД не встановлено!")
+        logging.error("Встановіть змінну PGPASSWORD або POSTGRES_PASSWORD в Railway Dashboard")
+        logging.error("Значення: QzsAGhrwcEEDuXlhmedoQJXYGTHfcvZV")
     
     logging.info(f"Використовуються змінні оточення для підключення: {config['user']}@{config['host']}:{config['port']}/{config['database']}")
     return config
