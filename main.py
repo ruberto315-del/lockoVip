@@ -2618,10 +2618,40 @@ async def run_inline_giveaway_animation(inline_message_id: str, active_users: li
 
 # Додаю функцію для нарахування реферальних атак
 
+async def check_and_expire_vip():
+    """Фонова задача для перевірки та зняття закінченого VIP"""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Перевіряємо кожну годину
+            async with db_pool.acquire() as conn:
+                now = get_kyiv_datetime()
+                # Знаходимо всіх користувачів з закінченим VIP
+                expired_users = await conn.fetch(
+                    'SELECT user_id, name FROM users WHERE is_vip = TRUE AND vip_expires_at IS NOT NULL AND vip_expires_at < $1',
+                    now
+                )
+                
+                if expired_users:
+                    count = 0
+                    for user in expired_users:
+                        try:
+                            await conn.execute('UPDATE users SET is_vip = FALSE WHERE user_id = $1', user['user_id'])
+                            count += 1
+                            logging.info(f"VIP автоматично знято у користувача {user['user_id']} ({user['name']})")
+                        except Exception as e:
+                            logging.error(f"Помилка при знятті VIP у користувача {user['user_id']}: {e}")
+                    
+                    if count > 0:
+                        logging.info(f"Автоматично знято VIP у {count} користувачів")
+        except Exception as e:
+            logging.error(f"Помилка в фоновій задачі перевірки VIP: {e}")
+            await asyncio.sleep(3600)  # Зачекати перед наступною спробою
+
 async def on_startup(dp):
     """Функція, яка викликається при старті бота"""
     logging.info("Запуск фонових задач...")
-    # Запускаємо scheduler для автоматичного відновлення атак
+    # Запускаємо фонову задачу для автоматичного зняття закінченого VIP
+    asyncio.create_task(check_and_expire_vip())
     logging.info("Фонові задачі запущено")
 
 if __name__ == '__main__':
