@@ -131,7 +131,13 @@ dp = Dispatcher(bot, storage=storage)
 
 async def init_db():
     global db_pool
-    db_pool = await asyncpg.create_pool(**db_config, min_size=5, max_size=20)
+    logging.info(f"Підключення до БД: {db_config['user']}@{db_config['host']}:{db_config['port']}/{db_config['database']}")
+    try:
+        db_pool = await asyncpg.create_pool(**db_config, min_size=5, max_size=20)
+        logging.info("✅ Успішно підключено до бази даних")
+    except Exception as e:
+        logging.error(f"❌ Помилка підключення до БД: {e}")
+        raise
     
     # Отримуємо інформацію про бота для обробки згадок
     try:
@@ -140,6 +146,7 @@ async def init_db():
         logging.error(f"Помилка отримання інформації про бота: {e}")
     
     async with db_pool.acquire() as conn:
+        logging.info("🔨 Початок створення таблиць...")
         # Створюємо таблиці окремо для кращої обробки помилок
         try:
             await conn.execute('''
@@ -151,9 +158,10 @@ async def init_db():
                     last_attack_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             ''')
-            logging.info("Таблиця users створена або вже існує")
+            logging.info("✅ Таблиця users створена або вже існує")
         except Exception as e:
-            logging.error(f"Помилка створення таблиці users: {e}")
+            logging.error(f"❌ Помилка створення таблиці users: {e}")
+            raise
         
         try:
             await conn.execute('''
@@ -161,9 +169,10 @@ async def init_db():
                     phone_number TEXT PRIMARY KEY
                 );
             ''')
-            logging.info("Таблиця blacklist створена або вже існує")
+            logging.info("✅ Таблиця blacklist створена або вже існує")
         except Exception as e:
-            logging.error(f"Помилка створення таблиці blacklist: {e}")
+            logging.error(f"❌ Помилка створення таблиці blacklist: {e}")
+            raise
         
         try:
             await conn.execute('''
@@ -174,9 +183,10 @@ async def init_db():
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             ''')
-            logging.info("Таблиця user_messages створена або вже існує")
+            logging.info("✅ Таблиця user_messages створена або вже існує")
         except Exception as e:
-            logging.error(f"Помилка створення таблиці user_messages: {e}")
+            logging.error(f"❌ Помилка створення таблиці user_messages: {e}")
+            raise
         
         # Видаляємо таблиці, які більше не використовуються
         try:
@@ -252,10 +262,17 @@ async def init_db():
                 SELECT table_name 
                 FROM information_schema.tables 
                 WHERE table_schema = 'public'
+                ORDER BY table_name
             ''')
-            logging.info(f"Таблиці в базі даних: {[table['table_name'] for table in tables]}")
+            table_names = [table['table_name'] for table in tables]
+            logging.info(f"📊 Таблиці в базі даних ({len(table_names)}): {', '.join(table_names) if table_names else 'НЕ ЗНАЙДЕНО!'}")
+            
+            if not table_names:
+                logging.warning("⚠️ УВАГА: Таблиці не знайдено! Можливо помилка при створенні.")
+            elif 'users' not in table_names or 'blacklist' not in table_names or 'user_messages' not in table_names:
+                logging.warning(f"⚠️ Деякі таблиці відсутні! Очікувані: users, blacklist, user_messages. Знайдені: {table_names}")
         except Exception as e:
-            logging.error(f"Помилка перевірки таблиць: {e}")
+            logging.error(f"❌ Помилка перевірки таблиць: {e}")
 
 class Dialog(StatesGroup):
     spam = State()
