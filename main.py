@@ -98,7 +98,7 @@ message = ("Привіт.\nВаш вибір: 👇")
 
 db_config = {
     'user': 'postgres',
-    'password': 'kXcfoihheRhCgwJUzBCJxNpdSTZIRvmL',
+    'password': 'IKuPewAqSxwLKsxFrwNQGIigrUoyZhOu',
     'database': 'railway',
     'host': 'postgres.railway.internal',
     'port': '5432',
