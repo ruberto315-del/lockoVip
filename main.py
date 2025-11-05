@@ -226,6 +226,7 @@ class Dialog(StatesGroup):
     delete_promo = State()
     enter_promo = State()
     add_to_blacklist = State()
+    search_user = State()
 
 async def email():
     name_length = random.randint(6, 12)
@@ -575,15 +576,30 @@ async def check_subscription_status(user_id):
         logging.warning(f"Користувач {user_id} не підписаний (статус: {status_str})")
     except ChatNotFound as e:
         logging.error(f"Канал не знайдено для користувача {user_id}: {e}")
+        logging.error(f"Перевірте чи бот доданий до каналу {channel_id} як адміністратор")
+        # Якщо канал не знайдено, пропускаємо перевірку (щоб не блокувати користувачів)
+        # Але можна змінити на return False, якщо потрібно блокувати при відсутності каналу
+        return True  # Пропускаємо перевірку якщо канал недоступний
     except Exception as e:
-        logging.error(f"Помилка перевірки підписки для користувача {user_id}: {type(e).__name__}: {e}")
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logging.error(f"Помилка перевірки підписки для користувача {user_id}: {error_type}: {error_msg}")
+        
+        # Якщо помилка "Chat not found" або подібна, пропускаємо перевірку
+        if "not found" in error_msg.lower() or "chat" in error_msg.lower():
+            logging.warning(f"Канал недоступний для перевірки, пропускаємо перевірку для користувача {user_id}")
+            return True
+        
         # Якщо помилка через те, що бот не має доступу, спробуємо альтернативний метод
         try:
             # Спробуємо отримати інформацію про канал
             chat = await bot.get_chat(chat_id=channel_id)
-            logging.info(f"Бот має доступ до каналу {channel_id}")
+            logging.info(f"Бот має доступ до каналу {channel_id}, але не може перевірити учасників")
         except Exception as chat_error:
             logging.error(f"Бот не може отримати доступ до каналу {channel_id}: {chat_error}")
+            logging.error(f"ВАЖЛИВО: Переконайтеся що бот доданий до каналу як адміністратор з правами перегляду учасників!")
+            # Якщо канал недоступний, пропускаємо перевірку
+            return True
     return False
 
 async def anti_flood(*args, **kwargs):
@@ -606,6 +622,7 @@ admin_keyboard.add("Додати номер до чорного списку")
 admin_keyboard.add("Статистика бота")
 admin_keyboard.add("Заблокувати користувача")
 admin_keyboard.add("Розблокувати користувача")
+admin_keyboard.add("Пошук користувача")
 admin_keyboard.add("Реферали")
 admin_keyboard.add("Створити промокод")
 admin_keyboard.add("Видалити промокод")
@@ -1752,6 +1769,147 @@ async def show_referrals(message: Message):
         await message.answer(message_text, parse_mode="HTML")
     else:
         await message.answer("Недостатньо прав.")
+
+@dp.message_handler(text="Пошук користувача")
+async def search_user_start(message: Message):
+    if message.from_user.id in ADMIN:
+        await message.answer(
+            "🔍 <b>Пошук користувача</b>\n\n"
+            "Введіть для пошуку:\n"
+            "• <b>ID користувача</b> (число)\n"
+            "• <b>Username</b> (без @)\n"
+            "• <b>Ім'я</b> (частина імені)\n\n"
+            "💡 Ви можете написати <b>Скасувати</b> для відміни операції.",
+            parse_mode="HTML"
+        )
+        await Dialog.search_user.set()
+    else:
+        await message.answer("Недостатньо прав.")
+
+@dp.message_handler(state=Dialog.search_user)
+async def search_user_process(message: Message, state: FSMContext):
+    search_query = message.text.strip()
+    
+    # Перевіряємо на скасування
+    if search_query.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
+        await state.finish()
+        await message.answer("❌ Операцію скасовано.", reply_markup=admin_keyboard)
+        return
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Спробуємо знайти за user_id (якщо введено число)
+            if search_query.isdigit():
+                user_id = int(search_query)
+                user = await conn.fetchrow(
+                    'SELECT * FROM users WHERE user_id = $1',
+                    user_id
+                )
+                if user:
+                    await send_user_info(message, user, conn)
+                    await state.finish()
+                    return
+            
+            # Пошук за username (без @)
+            username_query = search_query.lstrip('@')
+            users_by_username = await conn.fetch(
+                'SELECT * FROM users WHERE username ILIKE $1',
+                f'%{username_query}%'
+            )
+            
+            # Пошук за ім'ям
+            users_by_name = await conn.fetch(
+                'SELECT * FROM users WHERE name ILIKE $1',
+                f'%{search_query}%'
+            )
+            
+            # Об'єднуємо результати та видаляємо дублікати
+            all_users = {}
+            for user in users_by_username:
+                all_users[user['user_id']] = user
+            for user in users_by_name:
+                all_users[user['user_id']] = user
+            
+            if not all_users:
+                await message.answer(
+                    f"❌ Користувачів не знайдено за запитом: <b>{search_query}</b>",
+                    parse_mode="HTML"
+                )
+                await state.finish()
+                return
+            
+            # Якщо знайдено одного користувача - показуємо детальну інформацію
+            if len(all_users) == 1:
+                user = list(all_users.values())[0]
+                await send_user_info(message, user, conn)
+            else:
+                # Якщо знайдено кілька користувачів - показуємо список
+                message_text = f"🔍 <b>Знайдено користувачів: {len(all_users)}</b>\n\n"
+                for idx, user in enumerate(list(all_users.values())[:10], 1):  # Обмежуємо до 10
+                    user_id = user['user_id']
+                    name = user['name'] or "Без імені"
+                    username = user['username'] or "Без username"
+                    block_status = "🔴 Заблокований" if user['block'] == 1 else "🟢 Активний"
+                    message_text += f"{idx}. <a href='tg://user?id={user_id}'>{name}</a> (@{username})\n"
+                    message_text += f"   ID: <code>{user_id}</code> | {block_status}\n\n"
+                
+                if len(all_users) > 10:
+                    message_text += f"... та ще {len(all_users) - 10} користувачів"
+                
+                await message.answer(message_text, parse_mode="HTML")
+            
+            await state.finish()
+            
+    except Exception as e:
+        logging.error(f"Помилка при пошуку користувача: {e}")
+        await message.answer(f"❌ Помилка при пошуку: {str(e)}", reply_markup=admin_keyboard)
+        await state.finish()
+
+async def send_user_info(message: Message, user: dict, conn):
+    """Відправляє детальну інформацію про користувача"""
+    user_id = user['user_id']
+    name = user['name'] or "Без імені"
+    username = user['username'] or "Без username"
+    block_status = "🔴 Заблокований" if user['block'] == 1 else "🟢 Активний"
+    
+    # Отримуємо інформацію про рефералів
+    referral_info = await conn.fetchrow(
+        'SELECT COUNT(*) as count FROM referrals WHERE referrer_id = $1',
+        user_id
+    )
+    referral_count = referral_info['count'] if referral_info else 0
+    
+    # Отримуємо інформацію про реферера
+    referrer_name = None
+    if user['referrer_id']:
+        referrer = await conn.fetchrow(
+            'SELECT name, username FROM users WHERE user_id = $1',
+            user['referrer_id']
+        )
+        if referrer:
+            referrer_name = referrer['name'] or referrer['username'] or f"ID: {user['referrer_id']}"
+    
+    # Формуємо повідомлення
+    info_text = f"👤 <b>Інформація про користувача</b>\n\n"
+    info_text += f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+    info_text += f"📛 <b>Ім'я:</b> {name}\n"
+    info_text += f"📱 <b>Username:</b> @{username}\n"
+    info_text += f"🔒 <b>Статус:</b> {block_status}\n\n"
+    
+    info_text += f"🎯 <b>Атаки:</b>\n"
+    info_text += f"   • Залишилось: {user['attacks_left']}\n"
+    info_text += f"   • Промо: {user['promo_attacks']}\n"
+    info_text += f"   • Реферальні: {user['referral_attacks']}\n"
+    info_text += f"   • Нереалізовані реферальні: {user['unused_referral_attacks']}\n\n"
+    
+    if user['last_attack_date']:
+        info_text += f"📅 <b>Остання атака:</b> {user['last_attack_date']}\n\n"
+    
+    info_text += f"👥 <b>Реферали:</b> {referral_count}\n"
+    if referrer_name:
+        info_text += f"📥 <b>Реферер:</b> {referrer_name}\n"
+    
+    await message.answer(info_text, parse_mode="HTML", reply_markup=admin_keyboard)
 
 @dp.message_handler(text="Назад")
 async def back_to_admin_menu(message: Message):
