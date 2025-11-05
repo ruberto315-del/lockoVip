@@ -146,10 +146,7 @@ async def init_db():
                 name TEXT,
                 username TEXT,
                 block INTEGER DEFAULT 0,
-                last_attack_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                referrer_id BIGINT,
-                referral_count INTEGER DEFAULT 0,
-                referral_notification_sent BOOLEAN DEFAULT FALSE
+                last_attack_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS blacklist (
                 phone_number TEXT PRIMARY KEY
@@ -162,22 +159,23 @@ async def init_db():
             );
         ''')
         
-        # Додаємо нові колонки якщо їх немає
+        # Видаляємо таблиці, які більше не використовуються
         try:
-            await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER DEFAULT 0')
+            await conn.execute('DROP TABLE IF EXISTS promo_activations')
         except Exception as e:
-            logging.error(f"Error adding referral_count column: {e}")
+            logging.error(f"Error dropping promo_activations table: {e}")
         
         try:
-            await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT')
+            await conn.execute('DROP TABLE IF EXISTS promocodes')
         except Exception as e:
-            logging.error(f"Error adding referrer_id column: {e}")
-
+            logging.error(f"Error dropping promocodes table: {e}")
+        
         try:
-            await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_notification_sent BOOLEAN DEFAULT FALSE')
+            await conn.execute('DROP TABLE IF EXISTS referrals')
         except Exception as e:
-            logging.error(f"Error adding referral_notification_sent column: {e}")
-            
+            logging.error(f"Error dropping referrals table: {e}")
+        
+        # Додаємо нові колонки якщо їх немає
         try:
             await conn.execute('ALTER TABLE users ALTER COLUMN last_attack_date TYPE TIMESTAMP USING last_attack_date::timestamp')
         except Exception as e:
@@ -187,6 +185,11 @@ async def init_db():
             await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_vip BOOLEAN DEFAULT FALSE')
         except Exception as e:
             logging.error(f"Error adding is_vip column: {e}")
+
+        try:
+            await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expires_at TIMESTAMP')
+        except Exception as e:
+            logging.error(f"Error adding vip_expires_at column: {e}")
 
 class Dialog(StatesGroup):
     spam = State()
@@ -524,9 +527,28 @@ async def check_vip_status(user_id):
         return True  # Адміни завжди мають VIP
     try:
         async with db_pool.acquire() as conn:
-            result = await conn.fetchrow('SELECT is_vip FROM users WHERE user_id = $1', user_id)
+            result = await conn.fetchrow('SELECT is_vip, vip_expires_at FROM users WHERE user_id = $1', user_id)
             if result:
-                return result['is_vip'] if result['is_vip'] is not None else False
+                if not result['is_vip']:
+                    return False
+                # Перевіряємо чи не закінчився VIP
+                if result['vip_expires_at']:
+                    now = get_kyiv_datetime()
+                    expires_at = result['vip_expires_at']
+                    # PostgreSQL повертає datetime об'єкт, але перевіряємо на всяк випадок
+                    if isinstance(expires_at, str):
+                        # Якщо це рядок, конвертуємо в datetime
+                        expires_at = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+                    # Якщо expires_at - це datetime з timezone, конвертуємо в naive
+                    if hasattr(expires_at, 'replace'):
+                        expires_at = expires_at.replace(tzinfo=None)
+                    if expires_at < now:
+                        # VIP закінчився, оновлюємо статус
+                        await conn.execute('UPDATE users SET is_vip = FALSE WHERE user_id = $1', user_id)
+                        return False
+                    return True
+                # Якщо vip_expires_at не встановлено, але is_vip = True, вважаємо що VIP активний
+                return True
             return False
     except Exception as e:
         logging.error(f"Помилка перевірки VIP статусу для користувача {user_id}: {e}")
@@ -718,12 +740,12 @@ def generate_promo_code():
     characters = string.ascii_uppercase + string.digits
     return ''.join(random.choices(characters, k=length))
 
-async def add_user(user_id: int, name: str, username: str, referrer_id: int = None):
+async def add_user(user_id: int, name: str, username: str):
     today = get_kyiv_date()
     async with db_pool.acquire() as conn:
         await conn.execute(
-            'INSERT INTO users (user_id, name, username, block, last_attack_date, referrer_id, is_vip) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (user_id) DO NOTHING',
-            user_id, name, username, 0, today, referrer_id, False
+            'INSERT INTO users (user_id, name, username, block, last_attack_date, is_vip) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_id) DO NOTHING',
+            user_id, name, username, 0, today, False
         )
         
         
@@ -748,26 +770,8 @@ async def start(message: Message):
         return  # Ігноруємо команду /start в групах
     
     user_id = message.from_user.id
-    args = message.get_args()
-    referrer_id = None
-    if args and args.isdigit():
-        referrer_id = int(args)
-        if referrer_id == user_id:
-            referrer_id = None
-        else:
-            async with db_pool.acquire() as conn:
-                referrer_exists = await conn.fetchval('SELECT 1 FROM users WHERE user_id = $1', referrer_id)
-                if not referrer_exists:
-                    referrer_id = None
     
     if not await check_subscription_status(user_id):
-        # Зберігаємо повідомлення /start з аргументом для подальшої обробки після підписки
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                'INSERT INTO user_messages (user_id, message_text) VALUES ($1, $2)',
-                user_id, message.text
-            )
-        logging.info(f"Збережена інформація про реферальне посилання: user_id={user_id}, referrer_id={referrer_id}")
         await message.answer("Для використання бота потрібно підписатися на наш канал!", reply_markup=checkSubMenu)
         return
     
@@ -788,8 +792,8 @@ async def start(message: Message):
         await message.answer('Введіть команду /admin', reply_markup=profile_keyboard)
     else:
         if result is None:
-            # Новий користувач — додаємо з реферальним id, якщо є
-            await add_user(message.from_user.id, message.from_user.full_name, message.from_user.username, referrer_id)
+            # Новий користувач
+            await add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
         
         if result and result['block'] == 1:
             await message.answer("Вас заблоковано і ви не можете користуватися ботом.")
@@ -809,34 +813,9 @@ async def process_subscription_confirmation(callback_query: types.CallbackQuery)
             user_exists = await conn.fetchval('SELECT 1 FROM users WHERE user_id = $1', user_id)
             
             if not user_exists:
-                referrer_id = None
-                try:
-                    last_start_message = await conn.fetchval(
-                        'SELECT message_text FROM user_messages WHERE user_id = $1 AND message_text LIKE \'/start%\' ORDER BY timestamp DESC LIMIT 1',
-                        user_id
-                    )
-                    
-                    logging.info(f"Останнє повідомлення /start: {last_start_message}")
-                    
-                    if last_start_message and ' ' in last_start_message:
-                        args = last_start_message.split(' ')[1]
-                        if args.isdigit():
-                            referrer_id = int(args)
-                            if referrer_id == user_id:
-                                referrer_id = None
-                            else:
-                                referrer_exists = await conn.fetchval('SELECT 1 FROM users WHERE user_id = $1', referrer_id)
-                                if not referrer_exists:
-                                    referrer_id = None
-                    
-                    logging.info(f"Знайдено referrer_id: {referrer_id}")
-                except Exception as e:
-                    logging.error(f"Помилка при отриманні referrer_id: {e}")
+                # Додаємо нового користувача
+                await add_user(callback_query.from_user.id, callback_query.from_user.full_name, callback_query.from_user.username)
                 
-                # Додаємо користувача з реферальним ID, якщо є
-                await add_user(callback_query.from_user.id, callback_query.from_user.full_name, callback_query.from_user.username, referrer_id)
-                
-                # Перевіряємо, чи досягнуто 20 рефералів для повідомлення адміну
                 # Перевіряємо VIP статус
                 if not await check_vip_status(user_id):
                     await callback_query.message.edit_text(
@@ -1558,7 +1537,22 @@ async def send_user_info(message: Message, user: dict, conn):
     info_text += f"📛 <b>Ім'я:</b> {name}\n"
     info_text += f"📱 <b>Username:</b> @{username}\n"
     info_text += f"🔒 <b>Статус:</b> {block_status}\n"
-    info_text += f"⭐ <b>VIP:</b> {vip_status}\n\n"
+    info_text += f"⭐ <b>VIP:</b> {vip_status}\n"
+    
+    # Додаємо інформацію про дату закінчення VIP
+    if user.get('is_vip', False) and user.get('vip_expires_at'):
+        expires_at = user['vip_expires_at']
+        # PostgreSQL повертає datetime об'єкт
+        if isinstance(expires_at, str):
+            # Якщо це рядок, конвертуємо в datetime
+            expires_at = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+        # Якщо expires_at - це datetime з timezone, конвертуємо в naive для форматування
+        if hasattr(expires_at, 'replace') and expires_at.tzinfo:
+            expires_at = expires_at.replace(tzinfo=None)
+        expires_date = expires_at.strftime('%d.%m.%Y %H:%M')
+        info_text += f"📅 <b>VIP дійсний до:</b> {expires_date}\n"
+    
+    info_text += "\n"
     
     if user['last_attack_date']:
         info_text += f"📅 <b>Остання атака:</b> {user['last_attack_date']}\n"
@@ -1598,7 +1592,7 @@ async def give_vip_process(message: Message, state: FSMContext):
     try:
         async with db_pool.acquire() as conn:
             # Перевіряємо чи користувач існує
-            user = await conn.fetchrow('SELECT user_id, name, username, is_vip FROM users WHERE user_id = $1', target_user_id)
+            user = await conn.fetchrow('SELECT user_id, name, username, is_vip, vip_expires_at FROM users WHERE user_id = $1', target_user_id)
             
             if not user:
                 await message.answer(
@@ -1608,40 +1602,61 @@ async def give_vip_process(message: Message, state: FSMContext):
                 await state.finish()
                 return
 
+            # Розраховуємо дату закінчення VIP (30 днів від поточної дати)
+            vip_expires_at = get_kyiv_datetime() + timedelta(days=30)
+            
             # Перевіряємо чи вже має VIP
             if user['is_vip']:
+                # Якщо VIP вже є, продовжуємо його ще на 30 днів
+                await conn.execute(
+                    'UPDATE users SET is_vip = TRUE, vip_expires_at = $1 WHERE user_id = $2',
+                    vip_expires_at, target_user_id
+                )
                 name = user['name'] or "Без імені"
                 username = user['username'] or "Без username"
+                expires_date = vip_expires_at.strftime('%d.%m.%Y %H:%M')
                 await message.answer(
-                    f"ℹ️ Користувач <a href='tg://user?id={target_user_id}'>{name}</a> (@{username}) вже має VIP статус.",
+                    f"✅ VIP статус продовжено!\n\n"
+                    f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
+                    f"🆔 ID: <code>{target_user_id}</code>\n"
+                    f"📅 VIP дійсний до: {expires_date}",
                     parse_mode="HTML",
                     reply_markup=admin_keyboard
                 )
                 await state.finish()
                 return
             
-            # Видаємо VIP статус
-            await conn.execute('UPDATE users SET is_vip = TRUE WHERE user_id = $1', target_user_id)
+            # Видаємо VIP статус на 30 днів
+            await conn.execute(
+                'UPDATE users SET is_vip = TRUE, vip_expires_at = $1 WHERE user_id = $2',
+                vip_expires_at, target_user_id
+            )
             
             name = user['name'] or "Без імені"
             username = user['username'] or "Без username"
+            
+            # Форматуємо дату закінчення
+            expires_date = vip_expires_at.strftime('%d.%m.%Y %H:%M')
             
             # Повідомляємо адміна
             await message.answer(
                 f"✅ VIP статус успішно видано!\n\n"
                 f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
-                f"🆔 ID: <code>{target_user_id}</code>",
+                f"🆔 ID: <code>{target_user_id}</code>\n"
+                f"📅 VIP дійсний до: {expires_date}",
                 parse_mode="HTML",
                 reply_markup=admin_keyboard
             )
             
             # Повідомляємо користувача
             try:
+                expires_date_formatted = vip_expires_at.strftime('%d.%m.%Y %H:%M')
                 await bot.send_message(
                     target_user_id,
-                    "🎉 <b>Вітаємо!</b>\n\n"
-                    "Вам надано VIP статус!\n"
-                    "Тепер ви можете повною мірою користуватися ботом.",
+                    f"🎉 <b>Вітаємо!</b>\n\n"
+                    f"Вам надано VIP статус!\n"
+                    f"📅 VIP дійсний до: {expires_date_formatted}\n\n"
+                    f"Тепер ви можете повною мірою користуватися ботом.",
                     parse_mode="HTML"
                 )
             except Exception as e:
