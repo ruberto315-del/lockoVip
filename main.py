@@ -147,6 +147,20 @@ async def init_db():
     
     async with db_pool.acquire() as conn:
         logging.info("🔨 Початок створення таблиць...")
+        
+        # Спочатку перевіряємо чи таблиці вже існують
+        try:
+            existing_tables = await conn.fetch('''
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            ''')
+            if existing_tables:
+                logging.info(f"📋 Існуючі таблиці ДО створення: {[t['table_name'] for t in existing_tables]}")
+            else:
+                logging.info("📋 Таблиць не знайдено, створюємо нові...")
+        except Exception as e:
+            logging.warning(f"Не вдалося перевірити існуючі таблиці: {e}")
         # Створюємо таблиці окремо для кращої обробки помилок
         try:
             await conn.execute('''
