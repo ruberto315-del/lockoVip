@@ -309,6 +309,7 @@ class Dialog(StatesGroup):
     add_to_blacklist = State()
     search_user = State()
     give_vip = State()
+    remove_vip = State()
 
 async def email():
     name_length = random.randint(6, 12)
@@ -736,6 +737,7 @@ admin_keyboard.add("Заблокувати користувача")
 admin_keyboard.add("Розблокувати користувача")
 admin_keyboard.add("Пошук користувача")
 admin_keyboard.add("Видати віп")
+admin_keyboard.add("Забрати віп")
 admin_keyboard.add("Перевірити проксі")
 admin_keyboard.add("Перевірити сервіси")
 admin_keyboard.add("Назад")
@@ -1834,6 +1836,97 @@ async def give_vip_process(message: Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Помилка при видачі VIP: {e}")
         await message.answer(f"❌ Помилка при видачі VIP: {str(e)}", reply_markup=admin_keyboard)
+        await state.finish()
+
+@dp.message_handler(text="Забрати віп")
+async def remove_vip_start(message: Message):
+    if message.from_user.id in ADMIN:
+        await message.answer(
+            "🔴 <b>Забір VIP статусу</b>\n\n"
+            "Введіть ID користувача, у якого потрібно забрати VIP статус:\n\n"
+            "💡 Ви можете написати <b>Скасувати</b> для відміни операції.",
+            parse_mode="HTML"
+        )
+        await Dialog.remove_vip.set()
+    else:
+        await message.answer("Недостатньо прав.")
+
+@dp.message_handler(state=Dialog.remove_vip)
+async def remove_vip_process(message: Message, state: FSMContext):
+    user_input = message.text.strip()
+    
+    # Перевіряємо на скасування
+    if user_input.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
+        await state.finish()
+        await message.answer("❌ Операцію скасовано.", reply_markup=admin_keyboard)
+        return
+    
+    # Перевіряємо чи введено число (ID користувача)
+    if not user_input.isdigit():
+        await message.answer("❌ Помилка! Введіть коректний ID користувача (тільки цифри).")
+        return
+    
+    target_user_id = int(user_input)
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Перевіряємо чи користувач існує
+            user = await conn.fetchrow('SELECT user_id, name, username, is_vip FROM users WHERE user_id = $1', target_user_id)
+            
+            if not user:
+                await message.answer(
+                    f"❌ Користувач з ID <code>{target_user_id}</code> не знайдений в базі даних.",
+                    parse_mode="HTML"
+                )
+                await state.finish()
+                return
+            
+            # Перевіряємо чи має VIP
+            if not user['is_vip']:
+                name = user['name'] or "Без імені"
+                username = user['username'] or "Без username"
+                await message.answer(
+                    f"ℹ️ Користувач <a href='tg://user?id={target_user_id}'>{name}</a> (@{username}) не має VIP статусу.",
+                    parse_mode="HTML",
+                    reply_markup=admin_keyboard
+                )
+                await state.finish()
+                return
+            
+            # Забираємо VIP статус
+            await conn.execute(
+                'UPDATE users SET is_vip = FALSE, vip_expires_at = NULL WHERE user_id = $1',
+                target_user_id
+            )
+            
+            name = user['name'] or "Без імені"
+            username = user['username'] or "Без username"
+            
+            # Повідомляємо адміна
+            await message.answer(
+                f"✅ VIP статус успішно забрано!\n\n"
+                f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
+                f"🆔 ID: <code>{target_user_id}</code>",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard
+            )
+            
+            # Повідомляємо користувача
+            try:
+                await bot.send_message(
+                    target_user_id,
+                    "🔒 <b>VIP статус забрано</b>\n\n"
+                    "Ваш VIP статус було припинено адміністратором.",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logging.error(f"Не вдалося відправити повідомлення користувачу {target_user_id}: {e}")
+            
+            await state.finish()
+            
+    except Exception as e:
+        logging.error(f"Помилка при забранні VIP: {e}")
+        await message.answer(f"❌ Помилка при забранні VIP: {str(e)}", reply_markup=admin_keyboard)
         await state.finish()
 
 @dp.message_handler(text="Назад")
