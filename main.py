@@ -129,44 +129,6 @@ storage = MemoryStorage()
 bot = Bot(token=config.token)
 dp = Dispatcher(bot, storage=storage)
 
-# Функція для логування повідомлень користувачів
-async def log_user_message(message: types.Message):
-    """Логує повідомлення користувача в базу даних"""
-    # Перевіряємо чи БД ініціалізована
-    if db_pool is None:
-        return
-    
-    # Логуємо тільки повідомлення з особистого чату
-    if message.chat.type != 'private':
-        return
-    
-    # Логуємо тільки якщо є текст
-    if not message.text:
-        return
-    
-    user_id = message.from_user.id
-    username = message.from_user.username or None
-    name = message.from_user.full_name or None
-    message_text = message.text
-    
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                'INSERT INTO user_messages (user_id, username, name, message_text) VALUES ($1, $2, $3, $4)',
-                user_id, username, name, message_text
-            )
-    except Exception as e:
-        # Не логуємо помилки логування, щоб не зациклитися
-        logging.debug(f"Помилка логування повідомлення: {e}")
-
-# Реєструємо middleware для логування всіх повідомлень
-async def log_messages_middleware(handler, event, data):
-    """Middleware для логування всіх повідомлень"""
-    if isinstance(event, types.Message):
-        await log_user_message(event)
-    return await handler(event, data)
-
-dp.middleware.setup(log_messages_middleware)
 
 async def init_db():
     global db_pool
