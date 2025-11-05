@@ -175,6 +175,42 @@ async def init_db():
         except Exception as e:
             logging.error(f"Error dropping referrals table: {e}")
         
+        # Видаляємо колонки, які більше не використовуються з таблиці users
+        try:
+            await conn.execute('ALTER TABLE users DROP COLUMN IF EXISTS attacks_left')
+        except Exception as e:
+            logging.error(f"Error dropping attacks_left column: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE users DROP COLUMN IF EXISTS promo_attacks')
+        except Exception as e:
+            logging.error(f"Error dropping promo_attacks column: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE users DROP COLUMN IF EXISTS referral_attacks')
+        except Exception as e:
+            logging.error(f"Error dropping referral_attacks column: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE users DROP COLUMN IF EXISTS unused_referral_attacks')
+        except Exception as e:
+            logging.error(f"Error dropping unused_referral_attacks column: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE users DROP COLUMN IF EXISTS referrer_id')
+        except Exception as e:
+            logging.error(f"Error dropping referrer_id column: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE users DROP COLUMN IF EXISTS referral_count')
+        except Exception as e:
+            logging.error(f"Error dropping referral_count column: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE users DROP COLUMN IF EXISTS referral_notification_sent')
+        except Exception as e:
+            logging.error(f"Error dropping referral_notification_sent column: {e}")
+        
         # Додаємо нові колонки якщо їх немає
         try:
             await conn.execute('ALTER TABLE users ALTER COLUMN last_attack_date TYPE TIMESTAMP USING last_attack_date::timestamp')
