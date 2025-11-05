@@ -31,8 +31,6 @@ from headers_main import (
 import asyncpg
 import config
 import aiohttp
-import os
-from urllib.parse import urlparse
 import random
 import string
 import re
@@ -98,58 +96,13 @@ def get_kyiv_datetime():
 
 message = ("Привіт.\nВаш вибір: 👇")
 
-# Отримуємо налаштування БД зі змінних оточення або використовуємо fallback
-def get_db_config():
-    """Отримує конфігурацію БД зі змінних оточення"""
-    # Спробуємо отримати DATABASE_URL від Railway
-    database_url = os.getenv('DATABASE_URL')
-    
-    # Якщо DATABASE_URL містить шаблони Railway (не підставлені), ігноруємо його
-    if database_url and '${{' not in database_url:
-        # Парсимо DATABASE_URL формат: postgresql://user:password@host:port/database
-        parsed = urlparse(database_url)
-        config = {
-            'user': parsed.username or 'postgres',
-            'password': parsed.password or '',
-            'database': parsed.path.lstrip('/') or 'railway',
-            'host': parsed.hostname or 'postgres.railway.internal',
-            'port': parsed.port or 5432,
-        }
-        # Логуємо (без пароля для безпеки)
-        logging.info(f"Використовується DATABASE_URL для підключення: {parsed.username}@{parsed.hostname}:{parsed.port}/{config['database']}")
-        return config
-    
-    # Використовуємо окремі змінні оточення (Railway автоматично підставляє їх)
-    # Також перевіряємо Railway-специфічні змінні
-    config = {
-        'user': os.getenv('PGUSER') or os.getenv('POSTGRES_USER', 'postgres'),
-        'password': os.getenv('PGPASSWORD') or os.getenv('POSTGRES_PASSWORD', ''),
-        'database': os.getenv('PGDATABASE') or os.getenv('POSTGRES_DB', 'railway'),
-        'host': os.getenv('PGHOST') or os.getenv('RAILWAY_PRIVATE_DOMAIN') or 'postgres.railway.internal',
-        'port': int(os.getenv('PGPORT', '5432')),
-    }
-    
-    # Діагностика: перевіряємо які змінні доступні
-    logging.info(f"Діагностика змінних оточення:")
-    logging.info(f"  PGUSER: {'***' if os.getenv('PGUSER') else 'не встановлено'}")
-    logging.info(f"  POSTGRES_USER: {'***' if os.getenv('POSTGRES_USER') else 'не встановлено'}")
-    logging.info(f"  PGPASSWORD: {'***' if os.getenv('PGPASSWORD') else 'не встановлено'}")
-    logging.info(f"  POSTGRES_PASSWORD: {'***' if os.getenv('POSTGRES_PASSWORD') else 'не встановлено'}")
-    logging.info(f"  PGDATABASE: {os.getenv('PGDATABASE', 'не встановлено')}")
-    logging.info(f"  POSTGRES_DB: {os.getenv('POSTGRES_DB', 'не встановлено')}")
-    logging.info(f"  PGHOST: {os.getenv('PGHOST', 'не встановлено')}")
-    logging.info(f"  RAILWAY_PRIVATE_DOMAIN: {os.getenv('RAILWAY_PRIVATE_DOMAIN', 'не встановлено')}")
-    
-    # Перевіряємо чи всі обов'язкові значення встановлені
-    if not config['password']:
-        logging.error("ПОМИЛКА: Пароль БД не встановлено!")
-        logging.error("Встановіть змінну PGPASSWORD або POSTGRES_PASSWORD в Railway Dashboard")
-        logging.error("Значення: QzsAGhrwcEEDuXlhmedoQJXYGTHfcvZV")
-    
-    logging.info(f"Використовуються змінні оточення для підключення: {config['user']}@{config['host']}:{config['port']}/{config['database']}")
-    return config
-
-db_config = get_db_config()
+db_config = {
+    'user': 'postgres',
+    'password': 'QzsAGhrwcEEDuXlhmedoQJXYGTHfcvZV',
+    'database': 'railway',
+    'host': 'postgres.railway.internal',
+    'port': '5432',
+}
 
 # Використовуємо пул з'єднань замість одного з'єднання
 db_pool = None
