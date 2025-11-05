@@ -755,8 +755,11 @@ def load_proxies_from_file(path: str = "proxy.txt"):
                     continue
                 host, port, user, password = parts
                 result.append({"host": host, "port": port, "user": user, "password": password})
+    except FileNotFoundError:
+        # Файл не існує - це нормально, атаки працюватимуть без проксі
+        logging.info(f"Файл проксі '{path}' не знайдено. Атаки будуть виконуватись без проксі.")
     except Exception as e:
-        logging.error(f"Proxy load error: {e}")
+        logging.warning(f"Помилка при завантаженні проксі: {e}")
     return result
 
 def build_proxy_params(entry):
