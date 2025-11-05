@@ -1721,12 +1721,53 @@ async def give_vip_process(message: Message, state: FSMContext):
             user = await conn.fetchrow('SELECT user_id, name, username, is_vip, vip_expires_at FROM users WHERE user_id = $1', target_user_id)
             
             if not user:
-                await message.answer(
-                    f"❌ Користувач з ID <code>{target_user_id}</code> не знайдений в базі даних.",
-                    parse_mode="HTML"
-                )
-                await state.finish()
-                return
+                # Якщо користувача немає в базі, додаємо його без VIP
+                try:
+                    chat = await bot.get_chat(target_user_id)
+                    user_name = chat.first_name or "Без імені"
+                    if chat.last_name:
+                        user_name += f" {chat.last_name}"
+                    user_username = chat.username or None
+                    
+                    # Додаємо користувача в базу без VIP
+                    today = get_kyiv_date()
+                    await conn.execute(
+                        'INSERT INTO users (user_id, name, username, block, last_attack_date, is_vip) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_id) DO NOTHING',
+                        target_user_id, user_name, user_username, 0, today, False
+                    )
+                    
+                    # Отримуємо користувача з бази
+                    user = await conn.fetchrow('SELECT user_id, name, username, is_vip, vip_expires_at FROM users WHERE user_id = $1', target_user_id)
+                    
+                    if not user:
+                        await message.answer(
+                            f"❌ Не вдалося додати користувача з ID <code>{target_user_id}</code> до бази даних.",
+                            parse_mode="HTML"
+                        )
+                        await state.finish()
+                        return
+                    
+                    # Повідомляємо адміна що користувач доданий
+                    await message.answer(
+                        f"✅ Користувач доданий до бази даних!\n\n"
+                        f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{user_name}</a>\n"
+                        f"📱 Username: @{user_username if user_username else 'Без username'}\n"
+                        f"🆔 ID: <code>{target_user_id}</code>\n\n"
+                        f"💡 Тепер ви можете видати VIP цьому користувачу, введіть його ID знову.",
+                        parse_mode="HTML",
+                        reply_markup=admin_keyboard
+                    )
+                    await state.finish()
+                    return
+                except Exception as e:
+                    logging.error(f"Помилка при отриманні інформації про користувача {target_user_id}: {e}")
+                    await message.answer(
+                        f"❌ Користувач з ID <code>{target_user_id}</code> не знайдений в базі даних і не доступний через Telegram API.\n\n"
+                        f"Помилка: {str(e)}",
+                        parse_mode="HTML"
+                    )
+                    await state.finish()
+                    return
 
             # Розраховуємо дату закінчення VIP (30 днів від поточної дати)
             vip_expires_at = get_kyiv_datetime() + timedelta(days=30)
