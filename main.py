@@ -311,6 +311,7 @@ class Dialog(StatesGroup):
     give_vip = State()
     extend_vip = State()
     remove_vip = State()
+    choose_attack_type = State()
 
 async def email():
     name_length = random.randint(6, 12)
@@ -2648,11 +2649,10 @@ async def ukr(number, chat_id, proxy_url=None, proxy_auth=None, proxy_entry=None
     else:
         logging.warning("Список запитів порожній!")
 
-async def start_attack(number, chat_id):
+async def start_attack(number, chat_id, timeout=120, sleep_between_cycles=4.0):
     global attack_flags
     attack_flags[chat_id] = True
     
-    timeout = 100
     start_time = asyncio.get_event_loop().time()
 
     try:
@@ -2704,7 +2704,7 @@ async def start_attack(number, chat_id):
                 except Exception:
                     pass
                 return
-            await asyncio.sleep(4.0)  # Затримка 4 секунди між циклами (після повного завершення атаки)
+            await asyncio.sleep(sleep_between_cycles)  # Затримка між циклами (після повного завершення атаки)
             
     except asyncio.CancelledError:
         try:
@@ -2800,34 +2800,35 @@ async def handle_phone_number(message: Message, state: FSMContext = None):
             await message.answer(f"Номер <i>{number}</i> захищений від атаки.", parse_mode="html")
             return
 
-        # Перевіряємо та зменшуємо атаки
-        async with db_pool.acquire() as conn:
-            # Використовуємо транзакцію для гарантії атомарності
-            async with conn.transaction():
-                # Перевіряємо чи немає вже активної атаки для цього користувача (в private чатах chat_id == user_id)
-                if active_attacks.get(chat_id, False):
-                    await message.answer("⏳ У вас вже активна атака. Зачекайте поки вона завершиться або зупиніть її.")
-                    return
-                
-                # Оновлюємо last_attack_date
-                kyiv_now = get_kyiv_datetime()
-                await conn.execute(
-                    'UPDATE users SET last_attack_date = $1 WHERE user_id = $2',
-                    kyiv_now, user_id
-                )
+        # Перевіряємо чи немає вже активної атаки для цього користувача (в private чатах chat_id == user_id)
+        if active_attacks.get(chat_id, False):
+            await message.answer("⏳ У вас вже активна атака. Зачекайте поки вона завершиться або зупиніть її.")
+            return
         
-        # Позначаємо що атака активна для цього користувача (в private чатах chat_id == user_id)
-        active_attacks[chat_id] = True
-        cancel_keyboard = get_cancel_keyboard()
-        attack_flags[chat_id] = True 
-        status_msg = await message.answer(
-            f'🎯 Місія розпочата!\n\n📱 Ціль: <i>{number}</i>\n\n⚡ Статус: В процесі...',
+        # Зберігаємо номер телефону в стані та показуємо вибір типу атаки
+        if state is None:
+            state = FSMContext(storage=dp.storage, chat=message.chat.id, user=message.from_user.id)
+        
+        await state.update_data(phone_number=number)
+        await state.set_state(Dialog.choose_attack_type)
+        
+        # Створюємо клавіатуру для вибору типу атаки
+        attack_type_keyboard = types.InlineKeyboardMarkup()
+        short_attack_btn = types.InlineKeyboardButton(text='⚡ Коротка (2 хв)', callback_data='attack_short')
+        long_attack_btn = types.InlineKeyboardButton(text='🔥 Довга (15 хв)', callback_data='attack_long')
+        attack_type_keyboard.add(short_attack_btn)
+        attack_type_keyboard.add(long_attack_btn)
+        
+        # Додаємо кнопку "Скасувати"
+        cancel_btn = types.InlineKeyboardButton(text='❌ Скасувати', callback_data='cancel_attack_type')
+        attack_type_keyboard.add(cancel_btn)
+        
+        await message.answer(
+            f'📱 Номер: <i>{number}</i>\n\n'
+            '🎯 Оберіть тип атаки:',
             parse_mode="html",
-            reply_markup=get_cancel_keyboard()
+            reply_markup=attack_type_keyboard
         )
-        last_status_msg[chat_id] = status_msg.message_id
-
-        asyncio.create_task(start_attack(number, chat_id))
     else:
         await message.answer("🔢 Номер введено некоректно.\nСпробуйте ще раз \nФормат: <i>🇺🇦380XXXXXXXXX</i>", parse_mode="html")
 
@@ -2844,6 +2845,73 @@ async def cancel_attack(callback_query: types.CallbackQuery):
             await bot.edit_message_text("🛑 Зупиняємо атаку...", chat_id=chat_id, message_id=msg_id)
     except Exception:
         pass
+
+@dp.callback_query_handler(lambda c: c.data == "cancel_attack_type", state=Dialog.choose_attack_type)
+async def cancel_attack_type_choice(callback_query: types.CallbackQuery, state: FSMContext):
+    await state.finish()
+    await callback_query.message.edit_text("❌ Вибір типу атаки скасовано.")
+    await callback_query.answer("Скасовано")
+
+@dp.callback_query_handler(lambda c: c.data in ["attack_short", "attack_long"], state=Dialog.choose_attack_type)
+async def handle_attack_type_choice(callback_query: types.CallbackQuery, state: FSMContext):
+    chat_id = callback_query.message.chat.id
+    user_id = callback_query.from_user.id
+    attack_type = callback_query.data
+    
+    # Отримуємо номер телефону зі стану
+    data = await state.get_data()
+    number = data.get('phone_number')
+    
+    if not number:
+        await callback_query.answer("❌ Помилка: номер телефону не знайдено. Спробуйте ще раз.")
+        await state.finish()
+        return
+    
+    # Перевіряємо чи немає вже активної атаки
+    if active_attacks.get(chat_id, False):
+        await callback_query.answer("⏳ У вас вже активна атака. Зачекайте поки вона завершиться або зупиніть її.")
+        await state.finish()
+        return
+    
+    # Визначаємо параметри атаки
+    if attack_type == "attack_short":
+        timeout = 120  # 2 хвилини
+        attack_name = "Коротка (2 хв)"
+        sleep_between_cycles = 4.0  # Затримка між циклами для короткої атаки
+    else:  # attack_long
+        timeout = 900  # 15 хвилин
+        attack_name = "Довга (15 хв)"
+        sleep_between_cycles = 30.0  # 30 секунд між циклами для довгої атаки
+    
+    # Оновлюємо last_attack_date
+    async with db_pool.acquire() as conn:
+        kyiv_now = get_kyiv_datetime()
+        await conn.execute(
+            'UPDATE users SET last_attack_date = $1 WHERE user_id = $2',
+            kyiv_now, user_id
+        )
+    
+    # Позначаємо що атака активна
+    active_attacks[chat_id] = True
+    attack_flags[chat_id] = True
+    
+    # Завершуємо стан FSM
+    await state.finish()
+    
+    # Відправляємо повідомлення про початок атаки
+    status_msg = await callback_query.message.edit_text(
+        f'🎯 Місія розпочата!\n\n'
+        f'📱 Ціль: <i>{number}</i>\n'
+        f'⚡ Тип: {attack_name}\n\n'
+        f'⚡ Статус: В процесі...',
+        parse_mode="html"
+    )
+    last_status_msg[chat_id] = status_msg.message_id
+    
+    # Запускаємо атаку з відповідними параметрами
+    asyncio.create_task(start_attack(number, chat_id, timeout, sleep_between_cycles))
+    
+    await callback_query.answer(f"Атака {attack_name.lower()} запущена!")
 
 
 
