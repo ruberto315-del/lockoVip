@@ -1097,16 +1097,16 @@ async def admin_check_services(message: Message):
         megogo_auth_url = "https://megogo.net/ua/auth_login"
         async with aiohttp.ClientSession() as session:
             async with session.get(megogo_auth_url, headers=headers) as response:
-                # Отримуємо cookies з відповіді
-                megogo_cookies = dict(response.cookies)
+                # Отримуємо cookies з відповіді (конвертуємо SimpleCookie в словник)
+                megogo_cookies = {key: morsel.value for key, morsel in response.cookies.items()}
                 # Спробуємо отримати CSRF токен з cookies (PLAY_SESSION містить csrfToken)
                 play_session = megogo_cookies.get("PLAY_SESSION", "")
                 if play_session:
                     try:
                         # PLAY_SESSION це JWT токен, який містить csrfToken в payload
-                        import base64
                         # Розділяємо JWT на частини
-                        parts = play_session.split(".")
+                        play_session_str = str(play_session)
+                        parts = play_session_str.split(".")
                         if len(parts) >= 2:
                             # Декодуємо payload (друга частина)
                             payload = parts[1]
@@ -1114,11 +1114,19 @@ async def admin_check_services(message: Message):
                             padding = 4 - len(payload) % 4
                             if padding != 4:
                                 payload += "=" * padding
-                            decoded = base64.urlsafe_b64decode(payload)
-                            import json
-                            data = json.loads(decoded)
-                            if "data" in data and "csrfToken" in data["data"]:
-                                megogo_csrf_token = data["data"]["csrfToken"]
+                            decoded_bytes = base64.urlsafe_b64decode(payload)
+                            decoded_str = decoded_bytes.decode('utf-8')
+                            # Спробуємо розпарсити як JSON
+                            try:
+                                data = json.loads(decoded_str)
+                                if "data" in data and "csrfToken" in data["data"]:
+                                    megogo_csrf_token = data["data"]["csrfToken"]
+                            except (json.JSONDecodeError, ValueError):
+                                # Якщо не JSON, спробуємо знайти csrfToken в рядку
+                                if "csrfToken" in decoded_str:
+                                    match = re.search(r'"csrfToken"\s*:\s*"([^"]+)"', decoded_str)
+                                    if match:
+                                        megogo_csrf_token = match.group(1)
                     except Exception:
                         pass
                 # Якщо не вдалося отримати з cookies, спробуємо з HTML
@@ -2339,16 +2347,16 @@ async def ukr(number, chat_id, proxy_url=None, proxy_auth=None, proxy_entry=None
         megogo_auth_url = "https://megogo.net/ua/auth_login"
         async with aiohttp.ClientSession() as session:
             async with session.get(megogo_auth_url, headers=headers, proxy=proxy_url, proxy_auth=proxy_auth) as response:
-                # Отримуємо cookies з відповіді
-                megogo_cookies = dict(response.cookies)
+                # Отримуємо cookies з відповіді (конвертуємо SimpleCookie в словник)
+                megogo_cookies = {key: morsel.value for key, morsel in response.cookies.items()}
                 # Спробуємо отримати CSRF токен з cookies (PLAY_SESSION містить csrfToken)
                 play_session = megogo_cookies.get("PLAY_SESSION", "")
                 if play_session:
                     try:
                         # PLAY_SESSION це JWT токен, який містить csrfToken в payload
-                        import base64
                         # Розділяємо JWT на частини
-                        parts = play_session.split(".")
+                        play_session_str = str(play_session)
+                        parts = play_session_str.split(".")
                         if len(parts) >= 2:
                             # Декодуємо payload (друга частина)
                             payload = parts[1]
@@ -2356,12 +2364,21 @@ async def ukr(number, chat_id, proxy_url=None, proxy_auth=None, proxy_entry=None
                             padding = 4 - len(payload) % 4
                             if padding != 4:
                                 payload += "=" * padding
-                            decoded = base64.urlsafe_b64decode(payload)
-                            import json
-                            data = json.loads(decoded)
-                            if "data" in data and "csrfToken" in data["data"]:
-                                megogo_csrf_token = data["data"]["csrfToken"]
-                                logging.info(f"Отримано CSRF-токен для megogo: {megogo_csrf_token[:20]}...")
+                            decoded_bytes = base64.urlsafe_b64decode(payload)
+                            decoded_str = decoded_bytes.decode('utf-8')
+                            # Спробуємо розпарсити як JSON
+                            try:
+                                data = json.loads(decoded_str)
+                                if "data" in data and "csrfToken" in data["data"]:
+                                    megogo_csrf_token = data["data"]["csrfToken"]
+                                    logging.info(f"Отримано CSRF-токен для megogo: {megogo_csrf_token[:20]}...")
+                            except (json.JSONDecodeError, ValueError):
+                                # Якщо не JSON, спробуємо знайти csrfToken в рядку
+                                if "csrfToken" in decoded_str:
+                                    match = re.search(r'"csrfToken"\s*:\s*"([^"]+)"', decoded_str)
+                                    if match:
+                                        megogo_csrf_token = match.group(1)
+                                        logging.info(f"Отримано CSRF-токен для megogo (regex): {megogo_csrf_token[:20]}...")
                     except Exception as e:
                         logging.warning(f"Не вдалося розпарсити PLAY_SESSION для megogo: {e}")
                 # Якщо не вдалося отримати з cookies, спробуємо з HTML
