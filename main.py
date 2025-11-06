@@ -309,6 +309,7 @@ class Dialog(StatesGroup):
     add_to_blacklist = State()
     search_user = State()
     give_vip = State()
+    extend_vip = State()
     remove_vip = State()
 
 async def email():
@@ -737,6 +738,8 @@ admin_keyboard.add("Заблокувати користувача")
 admin_keyboard.add("Розблокувати користувача")
 admin_keyboard.add("Пошук користувача")
 admin_keyboard.add("Видати віп")
+admin_keyboard.add("Продлити віп")
+admin_keyboard.add("Усі користувачі")
 admin_keyboard.add("Забрати віп")
 admin_keyboard.add("Перевірити проксі")
 admin_keyboard.add("Перевірити сервіси")
@@ -917,16 +920,19 @@ async def start(message: Message):
         )
         return
     
+    # Завжди додаємо користувача до БД, якщо його там немає
     async with db_pool.acquire() as conn:
         result = await conn.fetchrow('SELECT block FROM users WHERE user_id = $1', user_id)
+        
+        # Якщо користувача немає в БД, додаємо його
+        if result is None:
+            await add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+            # Оновлюємо result після додавання
+            result = await conn.fetchrow('SELECT block FROM users WHERE user_id = $1', user_id)
     
     if message.from_user.id in ADMIN:
         await message.answer('Введіть команду /admin', reply_markup=profile_keyboard)
     else:
-        if result is None:
-            # Новий користувач
-            await add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-        
         if result and result['block'] == 1:
             await message.answer("Вас заблоковано і ви не можете користуватися ботом.")
             return
@@ -1795,6 +1801,21 @@ async def give_vip_process(message: Message, state: FSMContext):
                     parse_mode="HTML",
                     reply_markup=admin_keyboard
                 )
+                
+                # Повідомляємо користувача з панеллю кнопок
+                try:
+                    expires_date_formatted = vip_expires_at.strftime('%d.%m.%Y %H:%M')
+                    await bot.send_message(
+                        target_user_id,
+                        f"⏰ <b>VIP статус продовжено!</b>\n\n"
+                        f"Ваш VIP статус продовжено на 30 днів.\n"
+                        f"📅 VIP дійсний до: {expires_date_formatted}",
+                        parse_mode="HTML",
+                        reply_markup=profile_keyboard
+                    )
+                except Exception as e:
+                    logging.error(f"Не вдалося відправити повідомлення користувачу {target_user_id}: {e}")
+                
                 await state.finish()
                 return
             
@@ -1820,7 +1841,7 @@ async def give_vip_process(message: Message, state: FSMContext):
                 reply_markup=admin_keyboard
             )
             
-            # Повідомляємо користувача
+            # Повідомляємо користувача з панеллю кнопок
             try:
                 expires_date_formatted = vip_expires_at.strftime('%d.%m.%Y %H:%M')
                 await bot.send_message(
@@ -1829,7 +1850,8 @@ async def give_vip_process(message: Message, state: FSMContext):
                     f"Вам надано VIP статус!\n"
                     f"📅 VIP дійсний до: {expires_date_formatted}\n\n"
                     f"Тепер ви можете повною мірою користуватися ботом.",
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    reply_markup=profile_keyboard
                 )
             except Exception as e:
                 logging.error(f"Не вдалося відправити повідомлення користувачу {target_user_id}: {e}")
@@ -1840,6 +1862,189 @@ async def give_vip_process(message: Message, state: FSMContext):
         logging.error(f"Помилка при видачі VIP: {e}")
         await message.answer(f"❌ Помилка при видачі VIP: {str(e)}", reply_markup=admin_keyboard)
         await state.finish()
+
+@dp.message_handler(text="Продлити віп")
+async def extend_vip_start(message: Message):
+    if message.from_user.id in ADMIN:
+        await message.answer(
+            "⏰ <b>Продовження VIP статусу</b>\n\n"
+            "Введіть ID користувача, у якого потрібно продовжити VIP статус на 30 днів:\n\n"
+            "💡 Ви можете написати <b>Скасувати</b> для відміни операції.\n"
+            "💡 Операцію можна виконувати декілька разів для продовження терміну.",
+            parse_mode="HTML"
+        )
+        await Dialog.extend_vip.set()
+    else:
+        await message.answer("Недостатньо прав.")
+
+@dp.message_handler(state=Dialog.extend_vip)
+async def extend_vip_process(message: Message, state: FSMContext):
+    user_input = message.text.strip()
+    
+    # Перевіряємо на скасування
+    if user_input.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
+        await state.finish()
+        await message.answer("❌ Операцію скасовано.", reply_markup=admin_keyboard)
+        return
+    
+    # Перевіряємо чи введено число (ID користувача)
+    if not user_input.isdigit():
+        await message.answer("❌ Помилка! Введіть коректний ID користувача (тільки цифри).")
+        return
+    
+    target_user_id = int(user_input)
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Перевіряємо чи користувач існує
+            user = await conn.fetchrow('SELECT user_id, name, username, is_vip, vip_expires_at FROM users WHERE user_id = $1', target_user_id)
+            
+            if not user:
+                await message.answer(
+                    f"❌ Користувач з ID <code>{target_user_id}</code> не знайдений в базі даних.",
+                    parse_mode="HTML"
+                )
+                await state.finish()
+                return
+            
+            # Отримуємо поточну дату закінчення VIP або встановлюємо поточну дату
+            now = get_kyiv_datetime()
+            if user['vip_expires_at'] and user['is_vip']:
+                # Якщо VIP вже активний, продовжуємо від поточної дати закінчення
+                current_expires = user['vip_expires_at']
+                if isinstance(current_expires, str):
+                    current_expires = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
+                if hasattr(current_expires, 'replace'):
+                    current_expires = current_expires.replace(tzinfo=None)
+                # Якщо дата закінчення в майбутньому, продовжуємо від неї
+                if current_expires > now:
+                    vip_expires_at = current_expires + timedelta(days=30)
+                else:
+                    # Якщо VIP вже закінчився, встановлюємо від поточної дати
+                    vip_expires_at = now + timedelta(days=30)
+            else:
+                # Якщо VIP не активний, встановлюємо від поточної дати
+                vip_expires_at = now + timedelta(days=30)
+            
+            # Оновлюємо VIP статус
+            await conn.execute(
+                'UPDATE users SET is_vip = TRUE, vip_expires_at = $1 WHERE user_id = $2',
+                vip_expires_at, target_user_id
+            )
+            
+            name = user['name'] or "Без імені"
+            username = user['username'] or "Без username"
+            expires_date = vip_expires_at.strftime('%d.%m.%Y %H:%M')
+            
+            # Повідомляємо адміна
+            await message.answer(
+                f"✅ VIP статус продовжено на 30 днів!\n\n"
+                f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
+                f"🆔 ID: <code>{target_user_id}</code>\n"
+                f"📅 VIP дійсний до: {expires_date}",
+                parse_mode="HTML",
+                reply_markup=admin_keyboard
+            )
+            
+            # Повідомляємо користувача
+            try:
+                await bot.send_message(
+                    target_user_id,
+                    f"⏰ <b>VIP статус продовжено!</b>\n\n"
+                    f"Ваш VIP статус продовжено на 30 днів.\n"
+                    f"📅 VIP дійсний до: {expires_date}",
+                    parse_mode="HTML",
+                    reply_markup=profile_keyboard
+                )
+            except Exception as e:
+                logging.error(f"Не вдалося відправити повідомлення користувачу {target_user_id}: {e}")
+            
+            await state.finish()
+            
+    except Exception as e:
+        logging.error(f"Помилка при продовженні VIP: {e}")
+        await message.answer(f"❌ Помилка при продовженні VIP: {str(e)}", reply_markup=admin_keyboard)
+        await state.finish()
+
+@dp.message_handler(text="Усі користувачі")
+async def all_vip_users(message: Message):
+    if message.from_user.id not in ADMIN:
+        await message.answer("Недостатньо прав.")
+        return
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Отримуємо всіх користувачів з VIP статусом
+            vip_users = await conn.fetch('''
+                SELECT user_id, name, username, is_vip, vip_expires_at 
+                FROM users 
+                WHERE is_vip = TRUE 
+                ORDER BY vip_expires_at DESC NULLS LAST, user_id
+            ''')
+            
+            if not vip_users:
+                await message.answer(
+                    "📋 <b>Список VIP користувачів</b>\n\n"
+                    "На даний момент немає користувачів з VIP статусом.",
+                    parse_mode="HTML",
+                    reply_markup=admin_keyboard
+                )
+                return
+            
+            # Формуємо повідомлення з інформацією про всіх VIP користувачів
+            now = get_kyiv_datetime()
+            message_text = f"📋 <b>Список VIP користувачів</b>\n\n"
+            message_text += f"Всього користувачів з VIP: <b>{len(vip_users)}</b>\n\n"
+            
+            # Розбиваємо на частини, якщо користувачів багато (Telegram має обмеження на довжину повідомлення)
+            user_list = []
+            for user in vip_users:
+                user_id = user['user_id']
+                name = user['name'] or "Без імені"
+                username = user['username'] or "Без username"
+                expires_at = user['vip_expires_at']
+                
+                # Форматуємо дату закінчення
+                if expires_at:
+                    if isinstance(expires_at, str):
+                        expires_at = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+                    if hasattr(expires_at, 'replace'):
+                        expires_at = expires_at.replace(tzinfo=None)
+                    expires_str = expires_at.strftime('%d.%m.%Y %H:%M')
+                    if expires_at < now:
+                        expires_str += " ⚠️ (закінчився)"
+                else:
+                    expires_str = "Без обмеження"
+                
+                user_info = (
+                    f"👤 <a href='tg://user?id={user_id}'>{name}</a> (@{username})\n"
+                    f"🆔 ID: <code>{user_id}</code>\n"
+                    f"📅 VIP до: {expires_str}\n"
+                )
+                user_list.append(user_info)
+            
+            # Відправляємо повідомлення частинами, якщо воно занадто довге
+            current_message = message_text
+            for user_info in user_list:
+                if len(current_message + user_info) > 4000:
+                    # Відправляємо поточне повідомлення
+                    await message.answer(current_message, parse_mode="HTML", reply_markup=admin_keyboard)
+                    current_message = user_info
+                else:
+                    current_message += "\n" + user_info
+            
+            # Відправляємо останнє повідомлення
+            if current_message != message_text:
+                await message.answer(current_message, parse_mode="HTML", reply_markup=admin_keyboard)
+            else:
+                await message.answer(message_text, parse_mode="HTML", reply_markup=admin_keyboard)
+            
+    except Exception as e:
+        logging.error(f"Помилка при отриманні списку VIP користувачів: {e}")
+        await message.answer(
+            f"❌ Помилка при отриманні списку VIP користувачів: {str(e)}",
+            reply_markup=admin_keyboard
+        )
 
 @dp.message_handler(text="Забрати віп")
 async def remove_vip_start(message: Message):
