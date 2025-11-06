@@ -894,7 +894,17 @@ async def start(message: Message):
         await message.answer("Для використання бота потрібно підписатися на наш канал!", reply_markup=checkSubMenu)
         return
     
-    # Перевірка VIP статусу
+    # Завжди додаємо користувача до БД, якщо його там немає (ПЕРЕД перевіркою VIP)
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchrow('SELECT block FROM users WHERE user_id = $1', user_id)
+        
+        # Якщо користувача немає в БД, додаємо його
+        if result is None:
+            await add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
+            # Оновлюємо result після додавання
+            result = await conn.fetchrow('SELECT block FROM users WHERE user_id = $1', user_id)
+    
+    # Перевірка VIP статусу (після додавання до БД)
     if not await check_vip_status(user_id):
         # Повідомляємо адміну про користувача без VIP
         username = message.from_user.username or "Без username"
@@ -919,16 +929,6 @@ async def start(message: Message):
             parse_mode="HTML"
         )
         return
-    
-    # Завжди додаємо користувача до БД, якщо його там немає
-    async with db_pool.acquire() as conn:
-        result = await conn.fetchrow('SELECT block FROM users WHERE user_id = $1', user_id)
-        
-        # Якщо користувача немає в БД, додаємо його
-        if result is None:
-            await add_user(message.from_user.id, message.from_user.full_name, message.from_user.username)
-            # Оновлюємо result після додавання
-            result = await conn.fetchrow('SELECT block FROM users WHERE user_id = $1', user_id)
     
     if message.from_user.id in ADMIN:
         await message.answer('Введіть команду /admin', reply_markup=profile_keyboard)
@@ -1918,7 +1918,9 @@ async def extend_vip_process(message: Message, state: FSMContext):
                     current_expires = current_expires.replace(tzinfo=None)
                 # Якщо дата закінчення в майбутньому, продовжуємо від неї
                 if current_expires > now:
-                    vip_expires_at = current_expires + timedelta(days=30)
+                    # Додаємо 31 день, щоб отримати той самий день наступного місяця (30 днів + 1 для точності)
+                    # Це гарантує, що користувач отримає повні 30 днів
+                    vip_expires_at = current_expires + timedelta(days=31)
                 else:
                     # Якщо VIP вже закінчився, встановлюємо від поточної дати
                     vip_expires_at = now + timedelta(days=30)
