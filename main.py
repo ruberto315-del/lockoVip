@@ -1557,6 +1557,42 @@ async def add_to_blacklist(message: Message):
         await message.answer("Сталася помилка при додаванні номера до чорного списку.")
         print(f"Помилка: {e}")
 
+@dp.message_handler(commands=['unblock'])
+async def remove_from_blacklist(message: Message):
+    user_id = message.from_user.id
+    
+    # Перевіряємо чи користувач має права (VIP або адмін)
+    if not await check_vip_status(user_id) and user_id not in ADMIN:
+        await message.answer("❌ Недостатньо прав для розблокування номера.")
+        return
+    
+    args = message.get_args()
+    
+    if not args:
+        await message.answer("Будь ласка, введіть номер телефону для видалення з чорного списку.\nПриклад: /unblock 380XXXXXXXXX")
+        return
+    
+    phone = args.strip()
+    
+    if not re.match(r"^\d{12}$", phone):
+        await message.answer("Номер повинен бути формату: 380ХХХХХХХХХ. Будь ласка, введіть номер повторно.")
+        return
+
+    try:
+        async with db_pool.acquire() as conn:
+            # Перевіряємо чи номер є в чорному списку
+            exists = await conn.fetchval("SELECT 1 FROM blacklist WHERE phone_number = $1", phone)
+            if not exists:
+                await message.answer(f"Номер {phone} не знайдено в чорному списку.")
+                return
+            
+            # Видаляємо номер з чорного списку
+            await conn.execute("DELETE FROM blacklist WHERE phone_number = $1", phone)
+        await message.answer(f"✅ Номер {phone} видалено з чорного списку.")
+    except Exception as e:
+        await message.answer("❌ Сталася помилка при видаленні номера з чорного списку.")
+        logging.error(f"Помилка при видаленні з чорного списку: {e}")
+
 @dp.message_handler(commands=['nonstart'])
 async def nonstart(message: Message):
     empty_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
