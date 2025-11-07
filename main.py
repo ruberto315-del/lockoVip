@@ -2864,24 +2864,12 @@ async def handle_phone_number(message: Message, state: FSMContext = None):
         await state.update_data(phone_number=number)
         await state.set_state(Dialog.choose_attack_type)
         
-        # Перевіряємо чи номер вже заблокований
-        async with db_pool.acquire() as conn:
-            is_blacklisted = await conn.fetchval("SELECT 1 FROM blacklist WHERE phone_number = $1", number)
-        
         # Створюємо клавіатуру для вибору типу атаки
         attack_type_keyboard = types.InlineKeyboardMarkup()
         short_attack_btn = types.InlineKeyboardButton(text='⚡ Коротка (2 хв)', callback_data='attack_short')
         long_attack_btn = types.InlineKeyboardButton(text='🔥 Довга (15 хв)', callback_data='attack_long')
         attack_type_keyboard.add(short_attack_btn)
         attack_type_keyboard.add(long_attack_btn)
-        
-        # Додаємо кнопки блокування/розблокування номера
-        if is_blacklisted:
-            unblock_btn = types.InlineKeyboardButton(text='🔓 Розблокувати номер', callback_data=f'unblock_number_{number}')
-            attack_type_keyboard.add(unblock_btn)
-        else:
-            block_btn = types.InlineKeyboardButton(text='🔒 Заблокувати номер', callback_data=f'block_number_{number}')
-            attack_type_keyboard.add(block_btn)
         
         # Додаємо кнопку "Скасувати"
         cancel_btn = types.InlineKeyboardButton(text='❌ Скасувати', callback_data='cancel_attack_type')
@@ -2934,15 +2922,12 @@ async def block_number_handler(callback_query: types.CallbackQuery, state: FSMCo
         
         await callback_query.answer("✅ Номер заблоковано!")
         
-        # Оновлюємо повідомлення з новою кнопкою розблокування
+        # Оновлюємо повідомлення без кнопок блокування/розблокування
         attack_type_keyboard = types.InlineKeyboardMarkup()
         short_attack_btn = types.InlineKeyboardButton(text='⚡ Коротка (2 хв)', callback_data='attack_short')
         long_attack_btn = types.InlineKeyboardButton(text='🔥 Довга (15 хв)', callback_data='attack_long')
         attack_type_keyboard.add(short_attack_btn)
         attack_type_keyboard.add(long_attack_btn)
-        
-        unblock_btn = types.InlineKeyboardButton(text='🔓 Розблокувати номер', callback_data=f'unblock_number_{number}')
-        attack_type_keyboard.add(unblock_btn)
         
         cancel_btn = types.InlineKeyboardButton(text='❌ Скасувати', callback_data='cancel_attack_type')
         attack_type_keyboard.add(cancel_btn)
@@ -2976,15 +2961,12 @@ async def unblock_number_handler(callback_query: types.CallbackQuery, state: FSM
         
         await callback_query.answer("✅ Номер розблоковано!")
         
-        # Оновлюємо повідомлення з новою кнопкою блокування
+        # Оновлюємо повідомлення без кнопок блокування/розблокування
         attack_type_keyboard = types.InlineKeyboardMarkup()
         short_attack_btn = types.InlineKeyboardButton(text='⚡ Коротка (2 хв)', callback_data='attack_short')
         long_attack_btn = types.InlineKeyboardButton(text='🔥 Довга (15 хв)', callback_data='attack_long')
         attack_type_keyboard.add(short_attack_btn)
         attack_type_keyboard.add(long_attack_btn)
-        
-        block_btn = types.InlineKeyboardButton(text='🔒 Заблокувати номер', callback_data=f'block_number_{number}')
-        attack_type_keyboard.add(block_btn)
         
         cancel_btn = types.InlineKeyboardButton(text='❌ Скасувати', callback_data='cancel_attack_type')
         attack_type_keyboard.add(cancel_btn)
