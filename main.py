@@ -2817,7 +2817,8 @@ async def handle_phone_number(message: Message, state: FSMContext = None):
 
         # Перевіряємо чи немає вже активної атаки для цього користувача (в private чатах chat_id == user_id)
         if active_attacks.get(chat_id, False):
-            await message.answer("⏳ У вас вже активна атака. Зачекайте поки вона завершиться або зупиніть її.")
+            cancel_keyboard = get_cancel_keyboard()
+            await message.answer("⏳ У вас вже активна атака. Зачекайте поки вона завершиться або зупиніть її.", reply_markup=cancel_keyboard)
             return
         
         # Зберігаємо номер телефону в стані та показуємо вибір типу атаки
@@ -2827,12 +2828,24 @@ async def handle_phone_number(message: Message, state: FSMContext = None):
         await state.update_data(phone_number=number)
         await state.set_state(Dialog.choose_attack_type)
         
+        # Перевіряємо чи номер вже заблокований
+        async with db_pool.acquire() as conn:
+            is_blacklisted = await conn.fetchval("SELECT 1 FROM blacklist WHERE phone_number = $1", number)
+        
         # Створюємо клавіатуру для вибору типу атаки
         attack_type_keyboard = types.InlineKeyboardMarkup()
         short_attack_btn = types.InlineKeyboardButton(text='⚡ Коротка (2 хв)', callback_data='attack_short')
         long_attack_btn = types.InlineKeyboardButton(text='🔥 Довга (15 хв)', callback_data='attack_long')
         attack_type_keyboard.add(short_attack_btn)
         attack_type_keyboard.add(long_attack_btn)
+        
+        # Додаємо кнопки блокування/розблокування номера
+        if is_blacklisted:
+            unblock_btn = types.InlineKeyboardButton(text='🔓 Розблокувати номер', callback_data=f'unblock_number_{number}')
+            attack_type_keyboard.add(unblock_btn)
+        else:
+            block_btn = types.InlineKeyboardButton(text='🔒 Заблокувати номер', callback_data=f'block_number_{number}')
+            attack_type_keyboard.add(block_btn)
         
         # Додаємо кнопку "Скасувати"
         cancel_btn = types.InlineKeyboardButton(text='❌ Скасувати', callback_data='cancel_attack_type')
@@ -2867,6 +2880,90 @@ async def cancel_attack_type_choice(callback_query: types.CallbackQuery, state: 
     await callback_query.message.edit_text("❌ Вибір типу атаки скасовано.")
     await callback_query.answer("Скасовано")
 
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("block_number_"))
+async def block_number_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обробник для блокування номера"""
+    user_id = callback_query.from_user.id
+    number = callback_query.data.replace("block_number_", "")
+    
+    # Перевіряємо чи користувач має права (VIP або адмін)
+    if not await check_vip_status(user_id) and user_id not in ADMIN:
+        await callback_query.answer("❌ Недостатньо прав для блокування номера.", show_alert=True)
+        return
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Додаємо номер до чорного списку
+            await conn.execute("INSERT INTO blacklist (phone_number) VALUES ($1) ON CONFLICT DO NOTHING", number)
+        
+        await callback_query.answer("✅ Номер заблоковано!")
+        
+        # Оновлюємо повідомлення з новою кнопкою розблокування
+        attack_type_keyboard = types.InlineKeyboardMarkup()
+        short_attack_btn = types.InlineKeyboardButton(text='⚡ Коротка (2 хв)', callback_data='attack_short')
+        long_attack_btn = types.InlineKeyboardButton(text='🔥 Довга (15 хв)', callback_data='attack_long')
+        attack_type_keyboard.add(short_attack_btn)
+        attack_type_keyboard.add(long_attack_btn)
+        
+        unblock_btn = types.InlineKeyboardButton(text='🔓 Розблокувати номер', callback_data=f'unblock_number_{number}')
+        attack_type_keyboard.add(unblock_btn)
+        
+        cancel_btn = types.InlineKeyboardButton(text='❌ Скасувати', callback_data='cancel_attack_type')
+        attack_type_keyboard.add(cancel_btn)
+        
+        await callback_query.message.edit_text(
+            f'📱 Номер: <i>{number}</i>\n\n'
+            f'🔒 Номер заблоковано!\n\n'
+            '🎯 Оберіть тип атаки:',
+            parse_mode="html",
+            reply_markup=attack_type_keyboard
+        )
+    except Exception as e:
+        logging.error(f"Помилка при блокуванні номера: {e}")
+        await callback_query.answer("❌ Помилка при блокуванні номера.", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("unblock_number_"))
+async def unblock_number_handler(callback_query: types.CallbackQuery, state: FSMContext):
+    """Обробник для розблокування номера"""
+    user_id = callback_query.from_user.id
+    number = callback_query.data.replace("unblock_number_", "")
+    
+    # Перевіряємо чи користувач має права (VIP або адмін)
+    if not await check_vip_status(user_id) and user_id not in ADMIN:
+        await callback_query.answer("❌ Недостатньо прав для розблокування номера.", show_alert=True)
+        return
+    
+    try:
+        async with db_pool.acquire() as conn:
+            # Видаляємо номер з чорного списку
+            await conn.execute("DELETE FROM blacklist WHERE phone_number = $1", number)
+        
+        await callback_query.answer("✅ Номер розблоковано!")
+        
+        # Оновлюємо повідомлення з новою кнопкою блокування
+        attack_type_keyboard = types.InlineKeyboardMarkup()
+        short_attack_btn = types.InlineKeyboardButton(text='⚡ Коротка (2 хв)', callback_data='attack_short')
+        long_attack_btn = types.InlineKeyboardButton(text='🔥 Довга (15 хв)', callback_data='attack_long')
+        attack_type_keyboard.add(short_attack_btn)
+        attack_type_keyboard.add(long_attack_btn)
+        
+        block_btn = types.InlineKeyboardButton(text='🔒 Заблокувати номер', callback_data=f'block_number_{number}')
+        attack_type_keyboard.add(block_btn)
+        
+        cancel_btn = types.InlineKeyboardButton(text='❌ Скасувати', callback_data='cancel_attack_type')
+        attack_type_keyboard.add(cancel_btn)
+        
+        await callback_query.message.edit_text(
+            f'📱 Номер: <i>{number}</i>\n\n'
+            f'🔓 Номер розблоковано!\n\n'
+            '🎯 Оберіть тип атаки:',
+            parse_mode="html",
+            reply_markup=attack_type_keyboard
+        )
+    except Exception as e:
+        logging.error(f"Помилка при розблокуванні номера: {e}")
+        await callback_query.answer("❌ Помилка при розблокуванні номера.", show_alert=True)
+
 @dp.callback_query_handler(lambda c: c.data in ["attack_short", "attack_long"], state=Dialog.choose_attack_type)
 async def handle_attack_type_choice(callback_query: types.CallbackQuery, state: FSMContext):
     chat_id = callback_query.message.chat.id
@@ -2879,6 +2976,14 @@ async def handle_attack_type_choice(callback_query: types.CallbackQuery, state: 
     
     if not number:
         await callback_query.answer("❌ Помилка: номер телефону не знайдено. Спробуйте ще раз.")
+        await state.finish()
+        return
+    
+    # Перевіряємо чи номер не заблокований
+    async with db_pool.acquire() as conn:
+        is_blacklisted = await conn.fetchval("SELECT 1 FROM blacklist WHERE phone_number = $1", number)
+    if is_blacklisted:
+        await callback_query.answer("❌ Номер заблокований і захищений від атаки.", show_alert=True)
         await state.finish()
         return
     
@@ -2913,13 +3018,15 @@ async def handle_attack_type_choice(callback_query: types.CallbackQuery, state: 
     # Завершуємо стан FSM
     await state.finish()
     
-    # Відправляємо повідомлення про початок атаки
+    # Відправляємо повідомлення про початок атаки з кнопкою скасування
+    cancel_keyboard = get_cancel_keyboard()
     status_msg = await callback_query.message.edit_text(
         f'🎯 Місія розпочата!\n\n'
         f'📱 Ціль: <i>{number}</i>\n'
         f'⚡ Тип: {attack_name}\n\n'
         f'⚡ Статус: В процесі...',
-        parse_mode="html"
+        parse_mode="html",
+        reply_markup=cancel_keyboard
     )
     last_status_msg[chat_id] = status_msg.message_id
     
