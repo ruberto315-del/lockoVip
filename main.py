@@ -181,7 +181,8 @@ async def init_db():
         try:
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS blacklist (
-                    phone_number TEXT PRIMARY KEY
+                    phone_number TEXT PRIMARY KEY,
+                    blocked_by BIGINT
                 );
             ''')
             logging.info("✅ Таблиця blacklist створена або вже існує")
@@ -283,6 +284,13 @@ async def init_db():
             await conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS vip_expires_at TIMESTAMP')
         except Exception as e:
             logging.error(f"Error adding vip_expires_at column: {e}")
+        
+        # Додаємо поле blocked_by до таблиці blacklist якщо його немає
+        try:
+            await conn.execute('ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS blocked_by BIGINT')
+            # Старі записи без blocked_by залишаються доступними тільки для розблокування адмінами
+        except Exception as e:
+            logging.error(f"Error adding blocked_by column to blacklist: {e}")
         
         # Перевіряємо що таблиці створені
         try:
@@ -1526,8 +1534,12 @@ async def add_to_blacklist_process(message: Message, state: FSMContext):
         return
 
     try:
+        user_id = message.from_user.id
         async with db_pool.acquire() as conn:
-            await conn.execute("INSERT INTO blacklist (phone_number) VALUES ($1) ON CONFLICT DO NOTHING", phone)
+            await conn.execute(
+                "INSERT INTO blacklist (phone_number, blocked_by) VALUES ($1, $2) ON CONFLICT (phone_number) DO UPDATE SET blocked_by = $2",
+                phone, user_id
+            )
         await message.answer(f"✅ Номер {phone} додано до чорного списку.", parse_mode="html", reply_markup=profile_keyboard)
     except Exception as e:
         await message.answer("❌ Сталася помилка при додаванні номера до чорного списку.", parse_mode="html", reply_markup=profile_keyboard)
@@ -1537,6 +1549,7 @@ async def add_to_blacklist_process(message: Message, state: FSMContext):
 
 @dp.message_handler(commands=['block'])
 async def add_to_blacklist(message: Message):
+    user_id = message.from_user.id
     args = message.get_args()
     
     if not args:
@@ -1551,7 +1564,10 @@ async def add_to_blacklist(message: Message):
 
     try:
         async with db_pool.acquire() as conn:
-            await conn.execute("INSERT INTO blacklist (phone_number) VALUES ($1) ON CONFLICT DO NOTHING", phone)
+            await conn.execute(
+                "INSERT INTO blacklist (phone_number, blocked_by) VALUES ($1, $2) ON CONFLICT (phone_number) DO UPDATE SET blocked_by = $2",
+                phone, user_id
+            )
         await message.answer(f"Номер {phone} додано до чорного списку.")
     except Exception as e:
         await message.answer("Сталася помилка при додаванні номера до чорного списку.")
@@ -1580,11 +1596,25 @@ async def remove_from_blacklist(message: Message):
 
     try:
         async with db_pool.acquire() as conn:
-            # Перевіряємо чи номер є в чорному списку
-            exists = await conn.fetchval("SELECT 1 FROM blacklist WHERE phone_number = $1", phone)
-            if not exists:
+            # Перевіряємо чи номер є в чорному списку та хто його заблокував
+            blocked_info = await conn.fetchrow("SELECT blocked_by FROM blacklist WHERE phone_number = $1", phone)
+            if not blocked_info:
                 await message.answer(f"Номер {phone} не знайдено в чорному списку.")
                 return
+            
+            blocked_by = blocked_info['blocked_by']
+            
+            # Перевіряємо чи користувач має права на розблокування
+            # Адміни можуть розблоковувати будь-які номери
+            # Користувачі можуть розблоковувати тільки свої номери
+            if user_id not in ADMIN:
+                if blocked_by is None:
+                    # Старий запис без blocked_by - тільки адміни можуть розблокувати
+                    await message.answer("❌ Цей номер може розблокувати тільки адміністратор.")
+                    return
+                elif blocked_by != user_id:
+                    await message.answer("❌ Ви не можете розблокувати цей номер. Його може розблокувати тільки той, хто його заблокував.")
+                    return
             
             # Видаляємо номер з чорного списку
             await conn.execute("DELETE FROM blacklist WHERE phone_number = $1", phone)
@@ -2917,8 +2947,11 @@ async def block_number_handler(callback_query: types.CallbackQuery, state: FSMCo
     
     try:
         async with db_pool.acquire() as conn:
-            # Додаємо номер до чорного списку
-            await conn.execute("INSERT INTO blacklist (phone_number) VALUES ($1) ON CONFLICT DO NOTHING", number)
+            # Додаємо номер до чорного списку з інформацією про того, хто заблокував
+            await conn.execute(
+                "INSERT INTO blacklist (phone_number, blocked_by) VALUES ($1, $2) ON CONFLICT (phone_number) DO UPDATE SET blocked_by = $2",
+                number, user_id
+            )
         
         await callback_query.answer("✅ Номер заблоковано!")
         
@@ -2956,6 +2989,26 @@ async def unblock_number_handler(callback_query: types.CallbackQuery, state: FSM
     
     try:
         async with db_pool.acquire() as conn:
+            # Перевіряємо чи номер є в чорному списку та хто його заблокував
+            blocked_info = await conn.fetchrow("SELECT blocked_by FROM blacklist WHERE phone_number = $1", number)
+            if not blocked_info:
+                await callback_query.answer("❌ Номер не знайдено в чорному списку.", show_alert=True)
+                return
+            
+            blocked_by = blocked_info['blocked_by']
+            
+            # Перевіряємо чи користувач має права на розблокування
+            # Адміни можуть розблоковувати будь-які номери
+            # Користувачі можуть розблоковувати тільки свої номери
+            if user_id not in ADMIN:
+                if blocked_by is None:
+                    # Старий запис без blocked_by - тільки адміни можуть розблокувати
+                    await callback_query.answer("❌ Цей номер може розблокувати тільки адміністратор.", show_alert=True)
+                    return
+                elif blocked_by != user_id:
+                    await callback_query.answer("❌ Ви не можете розблокувати цей номер. Його може розблокувати тільки той, хто його заблокував.", show_alert=True)
+                    return
+            
             # Видаляємо номер з чорного списку
             await conn.execute("DELETE FROM blacklist WHERE phone_number = $1", number)
         
