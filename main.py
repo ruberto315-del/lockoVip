@@ -741,7 +741,6 @@ profile_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True).add(profile_b
 
 admin_keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
 admin_keyboard.add("Надіслати повідомлення користувачам")
-admin_keyboard.add("Додати номер до чорного списку")
 admin_keyboard.add("Статистика бота")
 admin_keyboard.add("Заблокувати користувача")
 admin_keyboard.add("Розблокувати користувача")
@@ -922,7 +921,7 @@ async def start(message: Message):
             try:
                 await bot.send_message(
                     admin_id,
-                    f"⚠️ <b>Користувач без VIP спробував використати бота</b>\n\n"
+                    f"⚠️ <b>Користувач без Premium спробував використати бота</b>\n\n"
                     f"👤 Ім'я: <a href='tg://user?id={user_id}'>{name}</a>\n"
                     f"📱 Username: @{username}\n\n"
                     f"🆔 ID:\n<code>{user_id}</code>",
@@ -932,8 +931,8 @@ async def start(message: Message):
                 logging.error(f"Помилка при відправленні адміну {admin_id}: {e}")
         
         await message.answer(
-            "🔒 <b>VIP доступ недоступний</b>\n\n"
-            "На жаль, у вас немає VIP статусу для використання бота.\n"
+            "🔒 <b>Premium доступ недоступний</b>\n\n"
+            "На жаль, у вас немає Premium статусу для використання бота.\n"
             "Для отримання доступу зверніться до адміністратора.",
             parse_mode="HTML"
         )
@@ -966,12 +965,12 @@ async def process_subscription_confirmation(callback_query: types.CallbackQuery)
                 # Перевіряємо VIP статус
                 if not await check_vip_status(user_id):
                     await callback_query.message.edit_text(
-                        "🔒 <b>VIP доступ недоступний</b>\n\n"
-                        "На жаль, у вас немає VIP статусу для використання бота.\n"
+                        "🔒 <b>Premium доступ недоступний</b>\n\n"
+                        "На жаль, у вас немає Premium статусу для використання бота.\n"
                         "Для отримання доступу зверніться до адміністратора.",
                         parse_mode="HTML"
                     )
-                    await callback_query.answer("Потрібен VIP статус", show_alert=True)
+                    await callback_query.answer("Потрібен Premium статус", show_alert=True)
                     return
                 
                 welcome_text = f"🎉 Ласкаво просимо, {callback_query.from_user.first_name}!\n\n"
@@ -983,12 +982,12 @@ async def process_subscription_confirmation(callback_query: types.CallbackQuery)
                 # Перевіряємо VIP статус для існуючих користувачів
                 if not await check_vip_status(user_id):
                     await callback_query.message.edit_text(
-                        "🔒 <b>VIP доступ недоступний</b>\n\n"
-                        "На жаль, у вас немає VIP статусу для використання бота.\n"
+                        "🔒 <b>Premium доступ недоступний</b>\n\n"
+                        "На жаль, у вас немає Premium статусу для використання бота.\n"
                         "Для отримання доступу зверніться до адміністратора.",
                         parse_mode="HTML"
                     )
-                    await callback_query.answer("Потрібен VIP статус", show_alert=True)
+                    await callback_query.answer("Потрібен Premium статус", show_alert=True)
                     return
                 
                 welcome_text = f"🎉 З поверненням, дуже на тебе чекали, {callback_query.from_user.first_name}!\n\n"
@@ -1512,46 +1511,6 @@ async def broadcast_message(message: Message, state: FSMContext):
     await message.answer(f'Повідомлення відправлено!\nУспішно: {success_count}\nПомилок: {error_count}')
     await state.finish()
 
-@dp.message_handler(text="Додати номер до чорного списку")
-async def add_to_blacklist_start(message: Message):
-    if message.from_user.id in ADMIN:
-        await message.answer("🔴 <b>Додавання номера до чорного списку</b>\n\nВведіть номер телефону:\nПриклад: <i>🇺🇦380xxxxxxxxx</i>\n\n💡 Ви можете написати <b>Скасувати</b> для відміни операції.", parse_mode="html")
-        await Dialog.add_to_blacklist.set()
-    else:
-        await message.answer("Недостатньо прав.")
-
-@dp.message_handler(state=Dialog.add_to_blacklist)
-async def add_to_blacklist_process(message: Message, state: FSMContext):
-    phone = message.text.strip()
-    
-    # Перевіряємо на скасування
-    if phone.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
-        await state.finish()
-        await message.answer("❌ Операцію скасовано.", reply_markup=profile_keyboard)
-        return
-    
-    # Видаляємо всі символи окрім цифр
-    phone = re.sub(r'\D', '', phone)
-    if phone.startswith('0'):
-        phone = '380' + phone[1:]
-
-    if not re.match(r"^\d{12}$", phone):
-        await message.answer("🔢 Номер введено некоректно.\n\nСпробуйте ще ра\nФормат: <i>🇺🇦380XXXXXXXXX</i>", parse_mode="html")
-        return
-
-    try:
-        user_id = message.from_user.id
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO blacklist (phone_number, blocked_by) VALUES ($1, $2) ON CONFLICT (phone_number) DO UPDATE SET blocked_by = $2",
-                phone, user_id
-            )
-        await message.answer(f"✅ Номер {phone} додано до чорного списку.", parse_mode="html", reply_markup=profile_keyboard)
-    except Exception as e:
-        await message.answer("❌ Сталася помилка при додаванні номера до чорного списку.", parse_mode="html", reply_markup=profile_keyboard)
-        logging.error(f"Помилка при додаванні в чорний список: {e}")
-    
-    await state.finish()
 
 @dp.message_handler(commands=['block'])
 async def add_to_blacklist(message: Message):
@@ -1795,7 +1754,7 @@ async def send_user_info(message: Message, user: dict, conn):
     name = user['name'] or "Без імені"
     username = user['username'] or "Без username"
     block_status = "🔴 Заблокований" if user['block'] == 1 else "🟢 Активний"
-    vip_status = "⭐ VIP" if user.get('is_vip', False) else "❌ Без VIP"
+    vip_status = "⭐ Premium" if user.get('is_vip', False) else "❌ Без Premium"
     
     # Формуємо повідомлення
     info_text = f"👤 <b>Інформація про користувача</b>\n\n"
@@ -1803,7 +1762,7 @@ async def send_user_info(message: Message, user: dict, conn):
     info_text += f"📛 <b>Ім'я:</b> {name}\n"
     info_text += f"📱 <b>Username:</b> @{username}\n"
     info_text += f"🔒 <b>Статус:</b> {block_status}\n"
-    info_text += f"⭐ <b>VIP:</b> {vip_status}\n"
+    info_text += f"⭐ <b>Premium:</b> {vip_status}\n"
     
     # Додаємо інформацію про дату закінчення VIP
     if user.get('is_vip', False) and user.get('vip_expires_at'):
@@ -1816,7 +1775,7 @@ async def send_user_info(message: Message, user: dict, conn):
         if hasattr(expires_at, 'replace') and expires_at.tzinfo:
             expires_at = expires_at.replace(tzinfo=None)
         expires_date = expires_at.strftime('%d.%m.%Y %H:%M')
-        info_text += f"📅 <b>VIP дійсний до:</b> {expires_date}\n"
+        info_text += f"📅 <b>Premium дійсний до:</b> {expires_date}\n"
     
     info_text += "\n"
     
@@ -1829,8 +1788,8 @@ async def send_user_info(message: Message, user: dict, conn):
 async def give_vip_start(message: Message):
     if message.from_user.id in ADMIN:
         await message.answer(
-            "⭐ <b>Видача VIP статусу</b>\n\n"
-            "Введіть ID користувача, якому потрібно видати VIP статус:\n\n"
+            "⭐ <b>Видача Premium статусу</b>\n\n"
+            "Введіть ID користувача, якому потрібно видати Premium статус:\n\n"
             "💡 Ви можете написати <b>Скасувати</b> для відміни операції.",
             parse_mode="HTML"
         )
@@ -1893,7 +1852,7 @@ async def give_vip_process(message: Message, state: FSMContext):
                         f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{user_name}</a>\n"
                         f"📱 Username: @{user_username if user_username else 'Без username'}\n"
                         f"🆔 ID: <code>{target_user_id}</code>\n\n"
-                        f"💡 Тепер ви можете видати VIP цьому користувачу, введіть його ID знову.",
+                        f"💡 Тепер ви можете видати Premium цьому користувачу, введіть його ID знову.",
                         parse_mode="HTML",
                         reply_markup=admin_keyboard
                     )
@@ -1923,10 +1882,10 @@ async def give_vip_process(message: Message, state: FSMContext):
                 username = user['username'] or "Без username"
                 expires_date = vip_expires_at.strftime('%d.%m.%Y %H:%M')
                 await message.answer(
-                    f"✅ VIP статус продовжено!\n\n"
+                    f"✅ Premium статус продовжено!\n\n"
                     f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
                     f"🆔 ID: <code>{target_user_id}</code>\n"
-                    f"📅 VIP дійсний до: {expires_date}",
+                    f"📅 Premium дійсний до: {expires_date}",
                     parse_mode="HTML",
                     reply_markup=admin_keyboard
                 )
@@ -1936,9 +1895,9 @@ async def give_vip_process(message: Message, state: FSMContext):
                     expires_date_formatted = vip_expires_at.strftime('%d.%m.%Y %H:%M')
                     await bot.send_message(
                         target_user_id,
-                        f"⏰ <b>VIP статус продовжено!</b>\n\n"
-                        f"Ваш VIP статус продовжено на 30 днів.\n"
-                        f"📅 VIP дійсний до: {expires_date_formatted}",
+                        f"⏰ <b>Premium статус продовжено!</b>\n\n"
+                        f"Ваш Premium статус продовжено на 30 днів.\n"
+                        f"📅 Premium дійсний до: {expires_date_formatted}",
                         parse_mode="HTML",
                         reply_markup=profile_keyboard
                     )
@@ -1962,10 +1921,10 @@ async def give_vip_process(message: Message, state: FSMContext):
             
             # Повідомляємо адміна
             await message.answer(
-                f"✅ VIP статус успішно видано!\n\n"
+                f"✅ Premium статус успішно видано!\n\n"
                 f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
                 f"🆔 ID: <code>{target_user_id}</code>\n"
-                f"📅 VIP дійсний до: {expires_date}",
+                f"📅 Premium дійсний до: {expires_date}",
                 parse_mode="HTML",
                 reply_markup=admin_keyboard
             )
@@ -1976,8 +1935,8 @@ async def give_vip_process(message: Message, state: FSMContext):
                 await bot.send_message(
                     target_user_id,
                     f"🎉 <b>Вітаємо!</b>\n\n"
-                    f"Вам надано VIP статус!\n"
-                    f"📅 VIP дійсний до: {expires_date_formatted}\n\n"
+                    f"Вам надано Premium статус!\n"
+                    f"📅 Premium дійсний до: {expires_date_formatted}\n\n"
                     f"Тепер ви можете повною мірою користуватися ботом.",
                     parse_mode="HTML",
                     reply_markup=profile_keyboard
@@ -1989,15 +1948,15 @@ async def give_vip_process(message: Message, state: FSMContext):
             
     except Exception as e:
         logging.error(f"Помилка при видачі VIP: {e}")
-        await message.answer(f"❌ Помилка при видачі VIP: {str(e)}", reply_markup=admin_keyboard)
+        await message.answer(f"❌ Помилка при видачі Premium: {str(e)}", reply_markup=admin_keyboard)
         await state.finish()
 
 @dp.message_handler(text="Продлити віп")
 async def extend_vip_start(message: Message):
     if message.from_user.id in ADMIN:
         await message.answer(
-            "⏰ <b>Продовження VIP статусу</b>\n\n"
-            "Введіть ID користувача, у якого потрібно продовжити VIP статус на 30 днів:\n\n"
+            "⏰ <b>Продовження Premium статусу</b>\n\n"
+            "Введіть ID користувача, у якого потрібно продовжити Premium статус на 30 днів:\n\n"
             "💡 Ви можете написати <b>Скасувати</b> для відміни операції.\n"
             "💡 Операцію можна виконувати декілька разів для продовження терміну.",
             parse_mode="HTML"
@@ -2069,10 +2028,10 @@ async def extend_vip_process(message: Message, state: FSMContext):
             
             # Повідомляємо адміна
             await message.answer(
-                f"✅ VIP статус продовжено на 30 днів!\n\n"
+                f"✅ Premium статус продовжено на 30 днів!\n\n"
                 f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
                 f"🆔 ID: <code>{target_user_id}</code>\n"
-                f"📅 VIP дійсний до: {expires_date}",
+                f"📅 Premium дійсний до: {expires_date}",
                 parse_mode="HTML",
                 reply_markup=admin_keyboard
             )
@@ -2081,9 +2040,9 @@ async def extend_vip_process(message: Message, state: FSMContext):
             try:
                 await bot.send_message(
                     target_user_id,
-                    f"⏰ <b>VIP статус продовжено!</b>\n\n"
-                    f"Ваш VIP статус продовжено на 30 днів.\n"
-                    f"📅 VIP дійсний до: {expires_date}",
+                    f"⏰ <b>Premium статус продовжено!</b>\n\n"
+                    f"Ваш Premium статус продовжено на 30 днів.\n"
+                    f"📅 Premium дійсний до: {expires_date}",
                     parse_mode="HTML",
                     reply_markup=profile_keyboard
                 )
@@ -2094,7 +2053,7 @@ async def extend_vip_process(message: Message, state: FSMContext):
             
     except Exception as e:
         logging.error(f"Помилка при продовженні VIP: {e}")
-        await message.answer(f"❌ Помилка при продовженні VIP: {str(e)}", reply_markup=admin_keyboard)
+        await message.answer(f"❌ Помилка при продовженні Premium: {str(e)}", reply_markup=admin_keyboard)
         await state.finish()
 
 @dp.message_handler(text="Усі користувачі")
@@ -2115,8 +2074,8 @@ async def all_vip_users(message: Message):
             
             if not vip_users:
                 await message.answer(
-                    "📋 <b>Список VIP користувачів</b>\n\n"
-                    "На даний момент немає користувачів з VIP статусом.",
+                    "📋 <b>Список Premium користувачів</b>\n\n"
+                    "На даний момент немає користувачів з Premium статусом.",
                     parse_mode="HTML",
                     reply_markup=admin_keyboard
                 )
@@ -2124,8 +2083,8 @@ async def all_vip_users(message: Message):
             
             # Формуємо повідомлення з інформацією про всіх VIP користувачів
             now = get_kyiv_datetime()
-            message_text = f"📋 <b>Список VIP користувачів</b>\n\n"
-            message_text += f"Всього користувачів з VIP: <b>{len(vip_users)}</b>\n\n"
+            message_text = f"📋 <b>Список Premium користувачів</b>\n\n"
+            message_text += f"Всього користувачів з Premium: <b>{len(vip_users)}</b>\n\n"
             
             # Розбиваємо на частини, якщо користувачів багато (Telegram має обмеження на довжину повідомлення)
             user_list = []
@@ -2150,7 +2109,7 @@ async def all_vip_users(message: Message):
                 user_info = (
                     f"👤 <a href='tg://user?id={user_id}'>{name}</a> (@{username})\n"
                     f"🆔 ID: <code>{user_id}</code>\n"
-                    f"📅 VIP до: {expires_str}\n"
+                    f"📅 Premium до: {expires_str}\n"
                 )
                 user_list.append(user_info)
             
@@ -2173,7 +2132,7 @@ async def all_vip_users(message: Message):
     except Exception as e:
         logging.error(f"Помилка при отриманні списку VIP користувачів: {e}")
         await message.answer(
-            f"❌ Помилка при отриманні списку VIP користувачів: {str(e)}",
+            f"❌ Помилка при отриманні списку Premium користувачів: {str(e)}",
             reply_markup=admin_keyboard
         )
 
@@ -2181,8 +2140,8 @@ async def all_vip_users(message: Message):
 async def remove_vip_start(message: Message):
     if message.from_user.id in ADMIN:
         await message.answer(
-            "🔴 <b>Забір VIP статусу</b>\n\n"
-            "Введіть ID користувача, у якого потрібно забрати VIP статус:\n\n"
+            "🔴 <b>Забір Premium статусу</b>\n\n"
+            "Введіть ID користувача, у якого потрібно забрати Premium статус:\n\n"
             "💡 Ви можете написати <b>Скасувати</b> для відміни операції.",
             parse_mode="HTML"
         )
@@ -2225,7 +2184,7 @@ async def remove_vip_process(message: Message, state: FSMContext):
                 name = user['name'] or "Без імені"
                 username = user['username'] or "Без username"
                 await message.answer(
-                    f"ℹ️ Користувач <a href='tg://user?id={target_user_id}'>{name}</a> (@{username}) не має VIP статусу.",
+                    f"ℹ️ Користувач <a href='tg://user?id={target_user_id}'>{name}</a> (@{username}) не має Premium статусу.",
                     parse_mode="HTML",
                     reply_markup=admin_keyboard
                 )
@@ -2243,7 +2202,7 @@ async def remove_vip_process(message: Message, state: FSMContext):
             
             # Повідомляємо адміна
             await message.answer(
-                f"✅ VIP статус успішно забрано!\n\n"
+                f"✅ Premium статус успішно забрано!\n\n"
                 f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
                 f"🆔 ID: <code>{target_user_id}</code>",
                 parse_mode="HTML",
@@ -2254,8 +2213,8 @@ async def remove_vip_process(message: Message, state: FSMContext):
             try:
                 await bot.send_message(
                     target_user_id,
-                    "🔒 <b>VIP статус забрано</b>\n\n"
-                    "Ваш VIP статус було припинено адміністратором.",
+                    "🔒 <b>Premium статус забрано</b>\n\n"
+                    "Ваш Premium статус було припинено адміністратором.",
                     parse_mode="HTML"
                 )
             except Exception as e:
@@ -2265,7 +2224,7 @@ async def remove_vip_process(message: Message, state: FSMContext):
             
     except Exception as e:
         logging.error(f"Помилка при забранні VIP: {e}")
-        await message.answer(f"❌ Помилка при забранні VIP: {str(e)}", reply_markup=admin_keyboard)
+        await message.answer(f"❌ Помилка при забранні Premium: {str(e)}", reply_markup=admin_keyboard)
         await state.finish()
 
 @dp.message_handler(text="Назад")
@@ -2301,8 +2260,8 @@ async def help(message: types.Message):
     
     if not await check_vip_status(user_id):
         await message.answer(
-            "🔒 <b>VIP доступ недоступний</b>\n\n"
-            "На жаль, у вас немає VIP статусу для використання бота.\n"
+            "🔒 <b>Premium доступ недоступний</b>\n\n"
+            "На жаль, у вас немає Premium статусу для використання бота.\n"
             "Для отримання доступу зверніться до адміністратора.",
             parse_mode="HTML"
         )
@@ -2340,8 +2299,8 @@ async def start_attack_prompt(message: Message):
     
     if not await check_vip_status(user_id):
         await message.answer(
-            "🔒 <b>VIP доступ недоступний</b>\n\n"
-            "На жаль, у вас немає VIP статусу для використання бота.\n"
+            "🔒 <b>Premium доступ недоступний</b>\n\n"
+            "На жаль, у вас немає Premium статусу для використання бота.\n"
             "Для отримання доступу зверніться до адміністратора.",
             parse_mode="HTML"
         )
@@ -3150,7 +3109,7 @@ async def inline_giveaway(inline_query: types.InlineQuery):
                 title='🎪 Тільки для груп',
                 description='Розіграш доступний тільки в групових чатах',
                 input_message_content=types.InputTextMessageContent(
-                    message_text='🎪 Розіграш VIP-статусу доступний лише в групових чатах!'
+                    message_text='🎪 Розіграш Premium-статусу доступний лише в групових чатах!'
                 )
             )
         ]
@@ -3175,10 +3134,10 @@ async def inline_giveaway(inline_query: types.InlineQuery):
         results = [
             types.InlineQueryResultArticle(
                 id='start_giveaway',
-                title='🎪 Розіграш VIP-статусу',
+                title='🎪 Розіграш Premium-статусу',
                 description='Визначити випадкового переможця серед активних користувачів',
                 input_message_content=types.InputTextMessageContent(
-                    message_text='🎉 <b>Розіграш VIP-статусу</b>\n\nГотовий обрати випадкового переможця серед усіх активних користувачів бота!\nНатисніть кнопку нижче, щоб запустити розіграш 🎲',
+                    message_text='🎉 <b>Розіграш Premium-статусу</b>\n\nГотовий обрати випадкового переможця серед усіх активних користувачів бота!\nНатисніть кнопку нижче, щоб запустити розіграш 🎲',
                     parse_mode='HTML'
                 ),
                 reply_markup=types.InlineKeyboardMarkup().add(
@@ -3343,7 +3302,7 @@ async def run_giveaway_animation(chat_id: int, message_id: int, active_users: li
             message = random.choice(search_messages)
         
         # Оновлюємо повідомлення
-        text = f"🎉 <b>Розіграш VIP-статусу</b>\n\n{message}\n\n[{progress_bar}] {percentage}%\n\n👥 Учасників: {len(active_users)}"
+        text = f"🎉 <b>Розіграш Premium-статусу</b>\n\n{message}\n\n[{progress_bar}] {percentage}%\n\n👥 Учасників: {len(active_users)}"
         
         try:
             await bot.edit_message_text(
@@ -3377,7 +3336,7 @@ async def run_giveaway_animation(chat_id: int, message_id: int, active_users: li
     # Фінальне повідомлення
     final_text = (
         f"🎉 <b>Вітаємо переможця!</b>\n\n"
-        f"🏆 Переможець розіграшу VIP-статусу:\n"
+        f"🏆 Переможець розіграшу Premium-статусу:\n"
         f"👤 {profile_link}\n"
         f"🆔 ID: <code>{winner_id}</code>\n\n"
         f"🎊 Вітаємо з перемогою!"
@@ -3427,7 +3386,7 @@ async def run_inline_giveaway_animation(inline_message_id: str, active_users: li
             message = random.choice(search_messages)
         
         # Оновлюємо повідомлення
-        text = f"🎉 <b>Розіграш VIP-статусу</b>\n\n{message}\n\n[{progress_bar}] {percentage}%\n\n👥 Учасників: {len(active_users)}"
+        text = f"🎉 <b>Розіграш Premium-статусу</b>\n\n{message}\n\n[{progress_bar}] {percentage}%\n\n👥 Учасників: {len(active_users)}"
         
         try:
             await bot.edit_message_text(
@@ -3457,7 +3416,7 @@ async def run_inline_giveaway_animation(inline_message_id: str, active_users: li
     # Фінальне повідомлення
     final_text = (
         f"🎉 <b>Вітаємо переможця!</b>\n\n"
-        f"🏆 Переможець розіграшу VIP-статусу:\n"
+        f"🏆 Переможець розіграшу Premium-статусу:\n"
         f"👤 {profile_link}\n"
         f"🆔 ID: <code>{winner_id}</code>\n\n"
         f"🎊 Вітаємо з перемогою!"
