@@ -317,6 +317,7 @@ class Dialog(StatesGroup):
     add_to_blacklist = State()
     search_user = State()
     give_vip = State()
+    give_vip_12h = State()
     extend_vip = State()
     remove_vip = State()
     choose_attack_type = State()
@@ -746,6 +747,7 @@ admin_keyboard.add("Заблокувати користувача")
 admin_keyboard.add("Розблокувати користувача")
 admin_keyboard.add("Пошук користувача")
 admin_keyboard.add("Видати віп")
+admin_keyboard.add("Видати віп на 12 годин")
 admin_keyboard.add("Продлити віп")
 admin_keyboard.add("Усі користувачі")
 admin_keyboard.add("Забрати віп")
@@ -1950,6 +1952,148 @@ async def give_vip_process(message: Message, state: FSMContext):
         logging.error(f"Помилка при видачі VIP: {e}")
         await message.answer(f"❌ Помилка при видачі Premium: {str(e)}", reply_markup=admin_keyboard)
         await state.finish()
+
+
+@dp.message_handler(text="Видати віп на 12 годин")
+async def give_vip_12h_start(message: Message):
+    if message.from_user.id in ADMIN:
+        await message.answer(
+            "⏳ <b>Видача Premium на 12 годин</b>\n\n"
+            "Введіть ID користувача, якому потрібно видати Premium статус на 12 годин:\n\n"
+            "💡 Ви можете написати <b>Скасувати</b> для відміни операції.",
+            parse_mode="HTML"
+        )
+        await Dialog.give_vip_12h.set()
+    else:
+        await message.answer("Недостатньо прав.")
+
+
+@dp.message_handler(state=Dialog.give_vip_12h)
+async def give_vip_12h_process(message: Message, state: FSMContext):
+    user_input = message.text.strip()
+    
+    if user_input.lower() in ['скасувати', 'отмена', 'отмінити', 'cancel']:
+        await state.finish()
+        await message.answer("❌ Операцію скасовано.", reply_markup=admin_keyboard)
+        return
+    
+    if not user_input.isdigit():
+        await message.answer("❌ Помилка! Введіть коректний ID користувача (тільки цифри).")
+        return
+    
+    target_user_id = int(user_input)
+    
+    try:
+        async with db_pool.acquire() as conn:
+            user = await conn.fetchrow('SELECT user_id, name, username, is_vip, vip_expires_at FROM users WHERE user_id = $1', target_user_id)
+            user_added = False
+            
+            if not user:
+                try:
+                    chat = await bot.get_chat(target_user_id)
+                    user_name = chat.first_name or "Без імені"
+                    if chat.last_name:
+                        user_name += f" {chat.last_name}"
+                    user_username = chat.username or None
+                    
+                    today = get_kyiv_date()
+                    await conn.execute(
+                        'INSERT INTO users (user_id, name, username, block, last_attack_date, is_vip) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_id) DO NOTHING',
+                        target_user_id, user_name, user_username, 0, today, False
+                    )
+                    
+                    user = await conn.fetchrow('SELECT user_id, name, username, is_vip, vip_expires_at FROM users WHERE user_id = $1', target_user_id)
+                    
+                    if not user:
+                        await message.answer(
+                            f"❌ Не вдалося додати користувача з ID <code>{target_user_id}</code> до бази даних.",
+                            parse_mode="HTML",
+                            reply_markup=admin_keyboard
+                        )
+                        await state.finish()
+                        return
+                    
+                    user_added = True
+                except Exception as e:
+                    logging.error(f"Помилка при отриманні інформації про користувача {target_user_id}: {e}")
+                    await message.answer(
+                        f"❌ Користувач з ID <code>{target_user_id}</code> не знайдений в базі даних і не доступний через Telegram API.\n\n"
+                        f"Помилка: {str(e)}",
+                        parse_mode="HTML",
+                        reply_markup=admin_keyboard
+                    )
+                    await state.finish()
+                    return
+            
+            now = get_kyiv_datetime()
+            current_expires = user['vip_expires_at']
+            if current_expires and isinstance(current_expires, str):
+                current_expires = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
+            if current_expires and hasattr(current_expires, 'replace'):
+                current_expires = current_expires.replace(tzinfo=None)
+            
+            vip_active = False
+            if user['is_vip']:
+                if not current_expires or current_expires > now:
+                    vip_active = True
+            
+            if vip_active:
+                expires_str = current_expires.strftime('%d.%m.%Y %H:%M') if current_expires else "безстроково"
+                await message.answer(
+                    "ℹ️ У користувача вже активний Premium статус.\n\n"
+                    f"📅 Дійсний до: {expires_str}\n"
+                    "Для повторної видачі спочатку зніміть поточний статус.",
+                    parse_mode="HTML",
+                    reply_markup=admin_keyboard
+                )
+                await state.finish()
+                return
+            
+            vip_expires_at = now + timedelta(hours=12)
+            
+            await conn.execute(
+                'UPDATE users SET is_vip = TRUE, vip_expires_at = $1 WHERE user_id = $2',
+                vip_expires_at, target_user_id
+            )
+            
+            name = user['name'] or "Без імені"
+            username = user['username'] or "Без username"
+            expires_date = vip_expires_at.strftime('%d.%m.%Y %H:%M')
+            
+            admin_message = (
+                "✅ Premium статус успішно видано на 12 годин!\n\n"
+                f"👤 Користувач: <a href='tg://user?id={target_user_id}'>{name}</a> (@{username})\n"
+                f"🆔 ID: <code>{target_user_id}</code>\n"
+                f"📅 Premium дійсний до: {expires_date}"
+            )
+            
+            if user_added:
+                admin_message = (
+                    "ℹ️ Користувача не було в базі даних — запис створено автоматично.\n\n"
+                    + admin_message
+                )
+            
+            await message.answer(admin_message, parse_mode="HTML", reply_markup=admin_keyboard)
+            
+            try:
+                await bot.send_message(
+                    target_user_id,
+                    "🎉 <b>Вітаємо!</b>\n\n"
+                    "Вам надано Premium статус на 12 годин!\n"
+                    f"📅 Premium дійсний до: {expires_date}",
+                    parse_mode="HTML",
+                    reply_markup=profile_keyboard
+                )
+            except Exception as e:
+                logging.error(f"Не вдалося відправити повідомлення користувачу {target_user_id}: {e}")
+        
+        await state.finish()
+    
+    except Exception as e:
+        logging.error(f"Помилка при видачі VIP на 12 годин: {e}")
+        await message.answer(f"❌ Помилка при видачі Premium на 12 годин: {str(e)}", reply_markup=admin_keyboard)
+        await state.finish()
+
 
 @dp.message_handler(text="Продлити віп")
 async def extend_vip_start(message: Message):
@@ -3450,7 +3594,20 @@ async def check_and_expire_vip():
                     count = 0
                     for user in expired_users:
                         try:
-                            await conn.execute('UPDATE users SET is_vip = FALSE WHERE user_id = $1', user['user_id'])
+                            await conn.execute(
+                                'UPDATE users SET is_vip = FALSE, vip_expires_at = NULL WHERE user_id = $1',
+                                user['user_id']
+                            )
+                            try:
+                                await bot.send_message(
+                                    user['user_id'],
+                                    "⏳ <b>Premium статус завершився</b>\n\n"
+                                    "Дія Premium пройшла, доступ обмежено до стандартного рівня.",
+                                    parse_mode="HTML",
+                                    reply_markup=profile_keyboard
+                                )
+                            except Exception as notify_error:
+                                logging.warning(f"Не вдалося повідомити користувача {user['user_id']} про закінчення VIP: {notify_error}")
                             count += 1
                             logging.info(f"VIP автоматично знято у користувача {user['user_id']} ({user['name']})")
                         except Exception as e:
